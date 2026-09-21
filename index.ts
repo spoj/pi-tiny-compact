@@ -1,0 +1,295 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export const COMPACT_INSTRUCTION = "__pi_tiny_compact_v1__";
+export const MAX_SUMMARY_CHARS = 12_000;
+
+const LIMIT = {
+  initial: 1_200,
+  inherited: 3_000,
+  message: 1_200,
+  tool: 500,
+  result: 600,
+  error: 1_200,
+  path: 240,
+  paths: 50,
+  pathSection: 1_500,
+};
+
+interface Preparation {
+  firstKeptEntryId: string;
+  messagesToSummarize: readonly unknown[];
+  turnPrefixMessages: readonly unknown[];
+  tokensBefore: number;
+  previousSummary?: string;
+  fileOps: {
+    read: Iterable<string>;
+    written: Iterable<string>;
+    edited: Iterable<string>;
+  };
+}
+
+export interface TinyCompactDetails {
+  compactor: "pi-tiny-compact";
+  version: 1;
+  initialRequest: string;
+  inheritedSummary: string;
+  transcript: string[];
+  omittedEntries: number;
+  readFiles: string[];
+  modifiedFiles: string[];
+}
+
+const recordLike = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const clean = (text: string): string =>
+  text
+    .replace(/\r\n?/g, "\n")
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+    .split("\n").map((line) => line.trimEnd()).join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+const clip = (text: string, max: number): string => {
+  const value = clean(text);
+  if (value.length <= max) return value;
+  const marker = "\n…[truncated]…\n";
+  const room = max - marker.length;
+  const head = Math.ceil(room / 2);
+  return value.slice(0, head) + marker + value.slice(-(room - head));
+};
+
+const label = (value: unknown): string =>
+  (typeof value === "string" ? value : "unknown")
+    .replace(/[^\p{L}\p{N}_.:-]+/gu, "_")
+    .slice(0, 60) || "unknown";
+
+const block = (name: string, body: string, max: number): string => {
+  const value = clip(body, max);
+  if (!value) return "";
+  return `[${label(name)}]\n${value.split("\n").map((line) => `  ${line}`).join("\n")}`;
+};
+
+const contentText = (content: unknown): string => {
+  if (typeof content === "string") return clean(content);
+  if (!Array.isArray(content)) return "";
+  return clean(content.flatMap((part) => {
+    if (!recordLike(part)) return [];
+    if (part.type === "text" && typeof part.text === "string") return [part.text];
+    if (part.type === "image") return [`[image: ${typeof part.mimeType === "string" ? part.mimeType : "unknown"}]`];
+    return [];
+  }).join("\n"));
+};
+
+const json = (value: unknown): string => {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
+};
+
+const toolArguments = (value: unknown): string => {
+  if (!recordLike(value)) return json(value);
+  for (const key of ["path", "file_path", "filePath", "file"]) {
+    if (typeof value[key] === "string") return `path: ${value[key]}`;
+  }
+  if (typeof value.command === "string") return `command: ${value.command}`;
+  if (typeof value.query === "string") return `query: ${value.query}`;
+  return json(value);
+};
+
+export const renderMessages = (messages: readonly unknown[]): string[] => {
+  const output: string[] = [];
+  const add = (name: string, body: string, max: number) => {
+    const value = block(name, body, max);
+    if (value) output.push(value);
+  };
+
+  for (const raw of messages) {
+    if (!recordLike(raw) || typeof raw.role !== "string") continue;
+
+    if (raw.role === "user") add("user", contentText(raw.content), LIMIT.message);
+
+    if (raw.role === "assistant") {
+      if (typeof raw.content === "string") add("assistant", raw.content, LIMIT.message);
+      if (Array.isArray(raw.content)) {
+        for (const part of raw.content) {
+          if (!recordLike(part)) continue;
+          if (part.type === "text" && typeof part.text === "string") add("assistant", part.text, LIMIT.message);
+          if (part.type === "toolCall") {
+            add(`tool:${label(part.name)}`, toolArguments(part.arguments) || "(no arguments)", LIMIT.tool);
+          }
+        }
+      }
+    }
+
+    if (raw.role === "toolResult") {
+      const failed = raw.isError === true;
+      add(
+        failed ? `tool-result:error:${label(raw.toolName)}` : `tool-result:${label(raw.toolName)}`,
+        contentText(raw.content),
+        failed ? LIMIT.error : LIMIT.result,
+      );
+    }
+
+    if (raw.role === "bashExecution") {
+      const failed = raw.exitCode !== 0;
+      const command = typeof raw.command === "string" ? `$ ${raw.command}` : "";
+      const result = typeof raw.output === "string" ? raw.output : "";
+      add(failed ? `bash:error:${raw.exitCode ?? "unknown"}` : "bash", [command, result].filter(Boolean).join("\n"), failed ? LIMIT.error : LIMIT.result);
+    }
+
+    if (raw.role === "custom") add(`context:${label(raw.customType)}`, contentText(raw.content), LIMIT.message);
+    if (raw.role === "branchSummary" && typeof raw.summary === "string") add("branch-summary", raw.summary, LIMIT.message);
+  }
+  return output;
+};
+
+const strings = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+const previousDetails = (entries: readonly unknown[]): TinyCompactDetails | undefined => {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (!recordLike(entry) || entry.type !== "compaction") continue;
+    const value = entry.details;
+    if (!recordLike(value) || value.compactor !== "pi-tiny-compact" || value.version !== 1) return;
+    return {
+      compactor: "pi-tiny-compact",
+      version: 1,
+      initialRequest: clip(typeof value.initialRequest === "string" ? value.initialRequest : "", LIMIT.initial),
+      inheritedSummary: clip(typeof value.inheritedSummary === "string" ? value.inheritedSummary : "", LIMIT.inherited),
+      transcript: strings(value.transcript).slice(-200).map((item) => clip(item, 1_500)),
+      omittedEntries: typeof value.omittedEntries === "number" && Number.isSafeInteger(value.omittedEntries)
+        ? Math.max(0, value.omittedEntries)
+        : 0,
+      readFiles: strings(value.readFiles).slice(-LIMIT.paths),
+      modifiedFiles: strings(value.modifiedFiles).slice(-LIMIT.paths),
+    };
+  }
+};
+
+const path = (value: string): string => {
+  const oneLine = clean(value).replace(/\s+/g, " ");
+  if (oneLine.length <= LIMIT.path) return oneLine;
+  const half = Math.floor((LIMIT.path - 1) / 2);
+  return `${oneLine.slice(0, half)}…${oneLine.slice(-half)}`;
+};
+
+const mergePaths = (old: readonly string[], fresh: Iterable<string>): string[] => {
+  const merged: string[] = [];
+  for (const raw of [...old, ...fresh]) {
+    if (typeof raw !== "string") continue;
+    const value = path(raw);
+    if (!value) continue;
+    const duplicate = merged.indexOf(value);
+    if (duplicate >= 0) merged.splice(duplicate, 1);
+    merged.push(value);
+  }
+  return merged.slice(-LIMIT.paths);
+};
+
+const renderPaths = (paths: readonly string[]): string => {
+  const lines: string[] = [];
+  let size = 0;
+  for (let i = paths.length - 1; i >= 0; i--) {
+    const line = `- ${paths[i]}`;
+    if (size + line.length + 1 > LIMIT.pathSection) break;
+    lines.push(line);
+    size += line.length + 1;
+  }
+  lines.reverse();
+  const omitted = paths.length - lines.length;
+  if (omitted) lines.unshift(`- … ${omitted} older paths omitted`);
+  return lines.join("\n");
+};
+
+export const renderSummary = (details: TinyCompactDetails): string => {
+  const sections: string[] = [];
+  const indent = (value: string) => value.split("\n").map((line) => `  ${line}`).join("\n");
+
+  if (details.initialRequest) sections.push(`[Initial Request]\n${indent(details.initialRequest)}`);
+  if (details.inheritedSummary) sections.push(`[Inherited Summary]\n${indent(details.inheritedSummary)}`);
+
+  const files: string[] = [];
+  if (details.modifiedFiles.length) files.push(`Modified:\n${renderPaths(details.modifiedFiles)}`);
+  if (details.readFiles.length) files.push(`Read:\n${renderPaths(details.readFiles)}`);
+  if (files.length) sections.push(`[Files Touched]\n${files.join("\n\n")}`);
+
+  const transcript = [...details.transcript];
+  if (details.omittedEntries) transcript.unshift(`(${details.omittedEntries} older compacted entries omitted)`);
+  sections.push(`[Recent Compacted Transcript]\n${transcript.join("\n\n") || "(no textual entries)"}`);
+  return sections.join("\n\n");
+};
+
+const firstUser = (messages: readonly unknown[]): string => {
+  for (const raw of messages) {
+    if (recordLike(raw) && raw.role === "user") {
+      const value = contentText(raw.content);
+      if (value) return clip(value, LIMIT.initial);
+    }
+  }
+  return "";
+};
+
+const fit = (
+  base: Omit<TinyCompactDetails, "transcript" | "omittedEntries">,
+  entries: readonly string[],
+  alreadyOmitted: number,
+): TinyCompactDetails => {
+  let transcript: string[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const candidate = [entries[i], ...transcript];
+    if (renderSummary({ ...base, transcript: candidate, omittedEntries: alreadyOmitted + i }).length > MAX_SUMMARY_CHARS) break;
+    transcript = candidate;
+  }
+  return { ...base, transcript, omittedEntries: alreadyOmitted + entries.length - transcript.length };
+};
+
+export const buildTinyCompaction = (preparation: Preparation, entries: readonly unknown[]) => {
+  const previous = previousDetails(entries);
+  const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+  const modifiedFiles = mergePaths(previous?.modifiedFiles ?? [], [...preparation.fileOps.written, ...preparation.fileOps.edited]);
+  const modified = new Set(modifiedFiles);
+  const readFiles = mergePaths(previous?.readFiles ?? [], preparation.fileOps.read).filter((item) => !modified.has(item));
+  const base: Omit<TinyCompactDetails, "transcript" | "omittedEntries"> = {
+    compactor: "pi-tiny-compact",
+    version: 1,
+    initialRequest: previous?.initialRequest ?? (preparation.previousSummary ? "" : firstUser(messages)),
+    inheritedSummary: previous?.inheritedSummary ?? clip(preparation.previousSummary ?? "", LIMIT.inherited),
+    readFiles,
+    modifiedFiles,
+  };
+  const details = fit(base, [...(previous?.transcript ?? []), ...renderMessages(messages)], previous?.omittedEntries ?? 0);
+  return {
+    summary: renderSummary(details),
+    firstKeptEntryId: preparation.firstKeptEntryId,
+    tokensBefore: preparation.tokensBefore,
+    details,
+  };
+};
+
+export default function tinyCompact(pi: ExtensionAPI) {
+  pi.on("session_before_compact", (event) => {
+    if (event.customInstructions !== COMPACT_INSTRUCTION) return;
+    if (event.signal.aborted) return { cancel: true };
+    return { compaction: buildTinyCompaction(event.preparation, event.branchEntries) };
+  });
+
+  pi.registerCommand("tiny-compact", {
+    description: "Compact deterministically without an LLM",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        ctx.ui.notify("/tiny-compact does not accept focus instructions", "warning");
+        return;
+      }
+      ctx.compact({
+        customInstructions: COMPACT_INSTRUCTION,
+        onComplete: () => ctx.ui.notify("Compacted with pi-tiny-compact", "info"),
+        onError: (error) => ctx.ui.notify(`Compaction failed: ${error.message}`, "error"),
+      });
+    },
+  });
+}
