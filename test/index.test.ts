@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import tinyCompact, {
   buildTinyCompaction,
-  COMPACT_INSTRUCTION,
   MAX_SUMMARY_CHARS,
   renderMessages,
 } from "../index.ts";
@@ -157,16 +156,14 @@ test("message text cannot forge cumulative file state", () => {
   assert.ok(second.summary.length <= MAX_SUMMARY_CHARS);
 });
 
-test("the extension only handles its marker and rejects command arguments", () => {
-  let beforeCompact: ((event: any) => any) | undefined;
-  let command: { handler: (args: string, ctx: any) => void } | undefined;
+test("the extension handles manual, threshold, and overflow compaction", () => {
+  let beforeCompact: ((event: any, ctx: any) => any) | undefined;
   const pi = {
-    on(name: string, handler: (event: any) => any) {
+    on(name: string, handler: (event: any, ctx: any) => any) {
       if (name === "session_before_compact") beforeCompact = handler;
     },
-    registerCommand(name: string, value: typeof command) {
-      assert.equal(name, "tiny-compact");
-      command = value;
+    registerCommand() {
+      assert.fail("no separate command should be registered");
     },
   };
   tinyCompact(pi as never);
@@ -177,20 +174,35 @@ test("the extension only handles its marker and rejects command arguments", () =
     preparation: preparation({ messagesToSummarize: [{ role: "user", content: "compact me" }] }),
     branchEntries: [],
   };
-  assert.equal(beforeCompact?.(event), undefined);
-  assert.ok(beforeCompact?.({ ...event, customInstructions: COMPACT_INSTRUCTION }).compaction);
+  const ctx = { ui: { notify() {} } };
+
+  for (const reason of ["manual", "threshold", "overflow"]) {
+    assert.ok(beforeCompact?.({ ...event, reason }, ctx).compaction);
+  }
+});
+
+test("the extension cancels aborted and focused compaction", () => {
+  let beforeCompact: ((event: any, ctx: any) => any) | undefined;
+  tinyCompact({
+    on(_name: string, handler: (event: any, ctx: any) => any) {
+      beforeCompact = handler;
+    },
+  } as never);
 
   const notifications: string[] = [];
-  const compactCalls: any[] = [];
-  const ctx = {
-    ui: { notify: (message: string) => notifications.push(message) },
-    compact: (options: unknown) => compactCalls.push(options),
+  const ctx = { ui: { notify: (message: string) => notifications.push(message) } };
+  const event = {
+    reason: "manual",
+    customInstructions: "focus on auth",
+    signal: new AbortController().signal,
+    preparation: preparation(),
+    branchEntries: [],
   };
-  command?.handler("focus on auth", ctx);
-  assert.equal(compactCalls.length, 0);
-  assert.match(notifications[0], /does not accept focus instructions/);
 
-  command?.handler("", ctx);
-  assert.equal(compactCalls.length, 1);
-  assert.equal(compactCalls[0].customInstructions, COMPACT_INSTRUCTION);
+  assert.deepEqual(beforeCompact?.(event, ctx), { cancel: true });
+  assert.match(notifications[0], /does not support focus instructions/);
+
+  const controller = new AbortController();
+  controller.abort();
+  assert.deepEqual(beforeCompact?.({ ...event, customInstructions: undefined, signal: controller.signal }, ctx), { cancel: true });
 });

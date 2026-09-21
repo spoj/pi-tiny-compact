@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export const COMPACT_INSTRUCTION = "__pi_tiny_compact_v1__";
 export const MAX_SUMMARY_CHARS = 12_000;
 
 const LIMIT = {
@@ -272,24 +271,12 @@ export const buildTinyCompaction = (preparation: Preparation, entries: readonly 
 };
 
 export default function tinyCompact(pi: ExtensionAPI) {
-  pi.on("session_before_compact", (event) => {
-    if (event.customInstructions !== COMPACT_INSTRUCTION) return;
+  pi.on("session_before_compact", (event, ctx) => {
     if (event.signal.aborted) return { cancel: true };
+    if (event.customInstructions?.trim()) {
+      ctx.ui.notify("pi-tiny-compact does not support focus instructions", "warning");
+      return { cancel: true };
+    }
     return { compaction: buildTinyCompaction(event.preparation, event.branchEntries) };
-  });
-
-  pi.registerCommand("tiny-compact", {
-    description: "Compact deterministically without an LLM",
-    handler: async (args, ctx) => {
-      if (args.trim()) {
-        ctx.ui.notify("/tiny-compact does not accept focus instructions", "warning");
-        return;
-      }
-      ctx.compact({
-        customInstructions: COMPACT_INSTRUCTION,
-        onComplete: () => ctx.ui.notify("Compacted with pi-tiny-compact", "info"),
-        onError: (error) => ctx.ui.notify(`Compaction failed: ${error.message}`, "error"),
-      });
-    },
   });
 }

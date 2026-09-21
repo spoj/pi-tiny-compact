@@ -7,16 +7,20 @@ It makes no model calls. Pi chooses what history to compact and what recent cont
 ## Install
 
 ```bash
-pi install git:github.com/spoj/pi-tiny-compact@v0.1.0
+pi install git:github.com/spoj/pi-tiny-compact@v0.2.0
 ```
 
 ## Usage
 
+Once installed, use Pi normally:
+
 ```text
-/tiny-compact
+/compact
 ```
 
-The command is intentionally explicit. It does not replace `/compact`, reinterpret focus instructions, or handle automatic threshold compaction.
+The extension supplies the result for every compaction reason: manual `/compact`, automatic threshold compaction, and overflow recovery. Pi still chooses the cut and retains recent context.
+
+Focused compaction such as `/compact focus on auth` is cancelled with a warning because deterministic logic cannot interpret the focus request.
 
 The generated summary contains:
 
