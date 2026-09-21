@@ -1,0 +1,29 @@
+{
+  "name": "pi-tiny-compact",
+  "version": "0.1.0",
+  "description": "Small deterministic conversation compactor for Pi",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.ts",
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/index.test.ts"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "compaction"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
