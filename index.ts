@@ -1,6 +1,8 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const MAX_SUMMARY_CHARS = 12_000;
+export const IDLE_MIN_TOKENS = 100_000;
+const DEFAULT_CACHE_TTL_SECONDS = 300;
 
 const LIMIT = {
   initial: 1_200,
@@ -279,4 +281,27 @@ export default function tinyCompact(pi: ExtensionAPI) {
     }
     return { compaction: buildTinyCompaction(event.preparation, event.branchEntries) };
   });
+
+  // The first request after the prompt cache expires re-caches the whole context, so shrink it first.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const compactWhenCacheExpires = (ctx: ExtensionContext) => {
+    clearTimeout(timer);
+    const lastCacheUse = ctx.sessionManager.getBranch().findLast((entry) =>
+      (entry.type === "message" && entry.message.role === "assistant") ||
+      (entry.type === "usage" && entry.kind === "cache_warm"));
+    if (!lastCacheUse) return;
+    const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
+    const ttl = ctx.model?.promptCache?.[retention] ?? DEFAULT_CACHE_TTL_SECONDS;
+    const wait = Date.parse(lastCacheUse.timestamp) + ttl * 1000 - Date.now();
+    if (wait > 0) {
+      timer = setTimeout(() => compactWhenCacheExpires(ctx), wait);
+      timer.unref();
+      return;
+    }
+    if (!ctx.isIdle() || pi.getSettings().compaction?.enabled === false) return;
+    if ((ctx.getContextUsage()?.tokens ?? 0) < IDLE_MIN_TOKENS) return;
+    ctx.compact({ onComplete: () => ctx.ui.notify("Compacted the idle session because its prompt cache expired", "info") });
+  };
+  pi.on("agent_settled", (_event, ctx) => compactWhenCacheExpires(ctx));
+  pi.on("session_shutdown", () => clearTimeout(timer));
 }

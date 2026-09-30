@@ -2,12 +2,12 @@
 
 A small deterministic conversation compactor for [Pi](https://github.com/earendil-works/pi).
 
-It makes no model calls. Pi chooses what history to compact and what recent context to retain; this extension only converts the discarded span into a bounded factual transcript.
+It makes no model calls. Pi chooses what history to compact and what recent context to retain; this extension only converts the discarded span into a bounded factual transcript. It also compacts large sessions once they have been idle long enough for the provider's prompt cache to expire.
 
 ## Install
 
 ```bash
-pi install git:github.com/spoj/pi-tiny-compact@v0.2.0
+pi install git:github.com/spoj/pi-tiny-compact@v0.3.0
 ```
 
 ## Usage
@@ -18,7 +18,7 @@ Once installed, use Pi normally:
 /compact
 ```
 
-The extension supplies the result for every compaction reason: manual `/compact`, automatic threshold compaction, and overflow recovery. Pi still chooses the cut and retains recent context.
+The extension supplies the result for every compaction reason: manual `/compact`, automatic threshold compaction, overflow recovery, and [idle compaction](#idle-compaction). Pi still chooses the cut and retains recent context.
 
 Focused compaction such as `/compact focus on auth` is cancelled with a warning because deterministic logic cannot interpret the focus request.
 
@@ -30,6 +30,15 @@ The generated summary contains:
 - recent user, assistant, tool-call, tool-result, custom-context, and shell records.
 
 Tool results are retained with larger allowances for errors. Assistant thinking is omitted. Message text is indented beneath generated role headers so it cannot alter the persisted summary structure.
+
+## Idle compaction
+
+Providers keep a prompt cache for a few minutes. The first request after it expires pays to cache the whole context again, which is expensive for a large session. When a run ends and the session then stays idle for its cache lifetime, pi-tiny-compact compacts it if the context holds at least 100,000 tokens. The next request then re-caches the summary and recent messages instead of the full history.
+
+- The cache lifetime is the model's `promptCache` value for the active retention (`PI_CACHE_RETENTION=long` selects the long tier), or five minutes when the model declares none.
+- Idle time counts from the last model response or cache-warming refresh, so with `cacheWarming: "idle"` compaction waits until Pi stops warming the cache.
+- A new run restarts the idle time. Nothing happens when `compaction.enabled` is `false`.
+- The compacted entries stay in the session file; `/tree` returns to them with the full context.
 
 ## Bounds
 

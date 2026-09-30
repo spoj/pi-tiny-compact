@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import tinyCompact, {
   buildTinyCompaction,
+  IDLE_MIN_TOKENS,
   MAX_SUMMARY_CHARS,
   renderMessages,
 } from "../index.ts";
@@ -184,8 +185,8 @@ test("the extension handles manual, threshold, and overflow compaction", () => {
 test("the extension cancels aborted and focused compaction", () => {
   let beforeCompact: ((event: any, ctx: any) => any) | undefined;
   tinyCompact({
-    on(_name: string, handler: (event: any, ctx: any) => any) {
-      beforeCompact = handler;
+    on(name: string, handler: (event: any, ctx: any) => any) {
+      if (name === "session_before_compact") beforeCompact = handler;
     },
   } as never);
 
@@ -205,4 +206,96 @@ test("the extension cancels aborted and focused compaction", () => {
   const controller = new AbortController();
   controller.abort();
   assert.deepEqual(beforeCompact?.({ ...event, customInstructions: undefined, signal: controller.signal }, ctx), { cancel: true });
+});
+
+const idleSession = (t: any, model: unknown = { promptCache: { short: 300, long: 3600 } }) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const handlers: Record<string, (event: any, ctx: any) => any> = {};
+  const settings: Record<string, any> = {};
+  tinyCompact({
+    on(name: string, handler: (event: any, ctx: any) => any) {
+      handlers[name] = handler;
+    },
+    getSettings: () => settings,
+  } as never);
+
+  const state = {
+    branch: [
+      { type: "message", timestamp: new Date(0).toISOString(), message: { role: "assistant" } },
+      { type: "custom", timestamp: new Date(60_000).toISOString() },
+    ] as unknown[],
+    idle: true,
+    tokens: IDLE_MIN_TOKENS as number | null,
+    compactions: 0,
+  };
+  const ctx = {
+    model,
+    sessionManager: { getBranch: () => state.branch },
+    isIdle: () => state.idle,
+    getContextUsage: () => ({ tokens: state.tokens }),
+    compact: () => state.compactions++,
+    ui: { notify() {} },
+  };
+  return { state, settings, settle: () => handlers.agent_settled({}, ctx), shutdown: () => handlers.session_shutdown({}, ctx) };
+};
+
+test("compacts a large idle session when its prompt cache expires", (t) => {
+  const { state, settle } = idleSession(t);
+  settle();
+  t.mock.timers.tick(299_999);
+  assert.equal(state.compactions, 0);
+  t.mock.timers.tick(1);
+  assert.equal(state.compactions, 1);
+});
+
+test("idle compaction waits out cache-warming refreshes", (t) => {
+  const { state, settle } = idleSession(t);
+  settle();
+  t.mock.timers.tick(270_000);
+  state.branch.push({ type: "usage", kind: "cache_warm", timestamp: new Date(270_000).toISOString() });
+  t.mock.timers.tick(299_999);
+  assert.equal(state.compactions, 0);
+  t.mock.timers.tick(1);
+  assert.equal(state.compactions, 1);
+});
+
+test("idle compaction uses the long cache lifetime and defaults to five minutes", (t) => {
+  const retention = process.env.PI_CACHE_RETENTION;
+  t.after(() => {
+    if (retention === undefined) delete process.env.PI_CACHE_RETENTION;
+    else process.env.PI_CACHE_RETENTION = retention;
+  });
+  process.env.PI_CACHE_RETENTION = "long";
+  const long = idleSession(t);
+  long.settle();
+  t.mock.timers.tick(3_599_999);
+  assert.equal(long.state.compactions, 0);
+  t.mock.timers.tick(1);
+  assert.equal(long.state.compactions, 1);
+
+  t.mock.timers.reset();
+  const unknown = idleSession(t, { id: "no-cache-metadata" });
+  unknown.settle();
+  t.mock.timers.tick(299_999);
+  assert.equal(unknown.state.compactions, 0);
+  t.mock.timers.tick(1);
+  assert.equal(unknown.state.compactions, 1);
+});
+
+test("idle compaction skips small, busy, disabled, and closed sessions", (t) => {
+  const cases: Array<(session: ReturnType<typeof idleSession>) => void> = [
+    ({ state }) => { state.tokens = IDLE_MIN_TOKENS - 1; },
+    ({ state }) => { state.tokens = null; },
+    ({ state }) => { state.idle = false; },
+    ({ settings }) => { settings.compaction = { enabled: false }; },
+    ({ shutdown }) => shutdown(),
+  ];
+  for (const change of cases) {
+    t.mock.timers.reset();
+    const session = idleSession(t);
+    session.settle();
+    change(session);
+    t.mock.timers.tick(300_000);
+    assert.equal(session.state.compactions, 0);
+  }
 });
