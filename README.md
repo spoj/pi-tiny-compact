@@ -42,7 +42,7 @@ Providers keep a prompt cache for a few minutes. The first request after it expi
 
 ## Bounds
 
-- Complete summary: 12,000 characters
+- Complete summary: 32,000 characters
 - Initial request: 1,200 characters
 - Inherited summary: 3,000 characters
 - User or assistant record: 1,200 characters
