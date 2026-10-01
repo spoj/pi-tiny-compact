@@ -220,50 +220,57 @@ export const renderSummary = (details: TinyCompactDetails): string => {
   if (files.length) sections.push(`[Files Touched]\n${files.join("\n\n")}`);
 
   const transcript = [...details.transcript];
-  if (details.omittedEntries) transcript.unshift(`(${details.omittedEntries} older compacted entries omitted)`);
-  sections.push(`[Recent Compacted Transcript]\n${transcript.join("\n\n") || "(no textual entries)"}`);
+  if (details.omittedEntries) transcript.unshift(`(${details.omittedEntries} compacted entries omitted)`);
+  sections.push(`[Compacted Transcript]\n${transcript.join("\n\n") || "(no textual entries)"}`);
   return sections.join("\n\n");
 };
 
-const firstUser = (messages: readonly unknown[]): string => {
-  for (const raw of messages) {
-    if (recordLike(raw) && raw.role === "user") {
-      const value = contentText(raw.content);
-      if (value) return clip(value, LIMIT.initial);
-    }
-  }
-  return "";
-};
+const isUserText = (raw: unknown): raw is Record<string, unknown> =>
+  recordLike(raw) && raw.role === "user" && contentText(raw.content) !== "";
+
+// Every record starts with its generated header; message text is indented beneath it.
+const priority = (record: string): number =>
+  record.startsWith("[user]") ? 0 : /^\[(assistant|branch-summary)\]/.test(record) ? 1 : 2;
 
 const fit = (
   base: Omit<TinyCompactDetails, "transcript" | "omittedEntries">,
-  entries: readonly string[],
+  records: readonly string[],
   alreadyOmitted: number,
 ): TinyCompactDetails => {
-  let transcript: string[] = [];
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const candidate = [entries[i], ...transcript];
-    if (renderSummary({ ...base, transcript: candidate, omittedEntries: alreadyOmitted + i }).length > MAX_SUMMARY_CHARS) break;
-    transcript = candidate;
+  const kept = new Set<number>();
+  const details = (): TinyCompactDetails => {
+    const transcript = records.filter((_, i) => kept.has(i));
+    return { ...base, transcript, omittedEntries: alreadyOmitted + records.length - transcript.length };
+  };
+  for (const level of [0, 1, 2]) {
+    for (let i = records.length - 1; i >= 0; i--) {
+      if (priority(records[i]) !== level) continue;
+      kept.add(i);
+      if (renderSummary(details()).length <= MAX_SUMMARY_CHARS) continue;
+      kept.delete(i);
+      break;
+    }
   }
-  return { ...base, transcript, omittedEntries: alreadyOmitted + entries.length - transcript.length };
+  return details();
 };
 
 export const buildTinyCompaction = (preparation: Preparation, entries: readonly unknown[]) => {
   const previous = previousDetails(entries);
   const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+  const initial = previous || preparation.previousSummary ? undefined : messages.find(isUserText);
   const modifiedFiles = mergePaths(previous?.modifiedFiles ?? [], [...preparation.fileOps.written, ...preparation.fileOps.edited]);
   const modified = new Set(modifiedFiles);
   const readFiles = mergePaths(previous?.readFiles ?? [], preparation.fileOps.read).filter((item) => !modified.has(item));
   const base: Omit<TinyCompactDetails, "transcript" | "omittedEntries"> = {
     compactor: "pi-tiny-compact",
     version: 1,
-    initialRequest: previous?.initialRequest ?? (preparation.previousSummary ? "" : firstUser(messages)),
+    initialRequest: previous?.initialRequest ?? (initial ? clip(contentText(initial.content), LIMIT.initial) : ""),
     inheritedSummary: previous?.inheritedSummary ?? clip(preparation.previousSummary ?? "", LIMIT.inherited),
     readFiles,
     modifiedFiles,
   };
-  const details = fit(base, [...(previous?.transcript ?? []), ...renderMessages(messages)], previous?.omittedEntries ?? 0);
+  const records = renderMessages(messages.filter((message) => message !== initial));
+  const details = fit(base, [...(previous?.transcript ?? []), ...records], previous?.omittedEntries ?? 0);
   return {
     summary: renderSummary(details),
     firstKeptEntryId: preparation.firstKeptEntryId,

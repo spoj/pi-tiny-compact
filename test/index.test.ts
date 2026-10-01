@@ -79,8 +79,57 @@ test("bounds the complete summary and keeps the newest transcript", () => {
 
   assert.ok(result.summary.length <= MAX_SUMMARY_CHARS);
   assert.match(result.summary, /message-499/);
-  assert.match(result.summary, /older compacted entries omitted/);
+  assert.match(result.summary, /compacted entries omitted/);
   assert.ok(result.details.omittedEntries > 0);
+});
+
+test("drops tool activity first, then assistant text, then user messages", () => {
+  const first = buildTinyCompaction(
+    preparation({
+      messagesToSummarize: [
+        { role: "user", content: "Start the migration" },
+        { role: "user", content: "Keep the old API working" },
+      ],
+    }),
+    [],
+  );
+  const work = Array.from({ length: 40 }, (_, i) => [
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: `answer-${i} ${"a".repeat(1_000)}` },
+        { type: "toolCall", name: "bash", arguments: { command: `step-${i}` } },
+      ],
+    },
+    { role: "toolResult", toolName: "bash", isError: false, content: [{ type: "text", text: `output-${i} ${"o".repeat(1_000)}` }] },
+    { role: "user", content: `note-${i}` },
+  ]).flat();
+  const { summary } = buildTinyCompaction(
+    preparation({ messagesToSummarize: work, previousSummary: first.summary }),
+    [{ type: "compaction", details: first.details }],
+  );
+
+  assert.ok(summary.length <= MAX_SUMMARY_CHARS);
+  assert.match(summary, /Keep the old API working/);
+  assert.match(summary, /note-0\b/);
+  assert.match(summary, /answer-39 /);
+  assert.doesNotMatch(summary, /answer-0 /);
+  assert.doesNotMatch(summary, /output-0 /);
+});
+
+test("does not repeat the initial request in the transcript", () => {
+  const { summary } = buildTinyCompaction(
+    preparation({
+      messagesToSummarize: [
+        { role: "user", content: "Build the parser" },
+        { role: "user", content: "Then the printer" },
+      ],
+    }),
+    [],
+  );
+
+  assert.equal(summary.match(/Build the parser/g)?.length, 1);
+  assert.match(summary, /\[user\]\n  Then the printer/);
 });
 
 test("merges repeated compactions through details instead of parsing summary text", () => {

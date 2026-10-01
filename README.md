@@ -7,7 +7,7 @@ It makes no model calls. Pi chooses what history to compact and what recent cont
 ## Install
 
 ```bash
-pi install git:github.com/spoj/pi-tiny-compact@v0.3.0
+pi install git:github.com/spoj/pi-tiny-compact@v0.4.0
 ```
 
 ## Usage
@@ -27,7 +27,7 @@ The generated summary contains:
 - the initial request when available;
 - a bounded inherited summary when taking over from another compactor;
 - files reported by Pi as read or modified;
-- recent user, assistant, tool-call, tool-result, custom-context, and shell records.
+- user, assistant, tool-call, tool-result, custom-context, and shell records, in order.
 
 Tool results are retained with larger allowances for errors. Assistant thinking is omitted. Message text is indented beneath generated role headers so it cannot alter the persisted summary structure.
 
@@ -51,7 +51,7 @@ Providers keep a prompt cache for a few minutes. The first request after it expi
 - Failed tool result: 1,200 characters
 - Remembered files: 50 per category
 
-Older transcript records roll off when the summary reaches its limit. The original session entries remain in Pi's session file, but this extension does not claim lossless recall.
+When the summary reaches its limit, tool activity and custom context roll off first, then assistant text, then user messages, oldest first within each. User instructions therefore survive long tool-heavy runs and repeated compactions. The original session entries remain in Pi's session file, but this extension does not claim lossless recall.
 
 Repeated compactions merge structured state stored in the compaction entry's `details`; they never parse generated summary text.
 
