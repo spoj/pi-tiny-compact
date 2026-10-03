@@ -33,7 +33,7 @@ Tool results are retained with larger allowances for errors. Assistant thinking 
 
 ## Idle compaction
 
-Providers keep a prompt cache for a few minutes. The first request after it expires pays to cache the whole context again, which is expensive for a large session. When a run ends and the session then stays idle for its cache lifetime, pi-tiny-compact compacts it if the context holds at least 100,000 tokens. The next request then re-caches the summary and recent messages instead of the full history.
+Providers keep a prompt cache for a few minutes. The first request after it expires pays to cache the whole context again, which is expensive for a large session. When a run ends and the session then stays idle for its cache lifetime, pi-tiny-compact compacts it if the context holds at least 250,000 tokens. The next request then re-caches the summary and recent messages instead of the full history.
 
 - The cache lifetime is the model's `promptCache` value for the active retention (`PI_CACHE_RETENTION=long` selects the long tier), or five minutes when the model declares none.
 - Idle time counts from the last model response or cache-warming refresh, so with `cacheWarming: "idle"` compaction waits until Pi stops warming the cache.

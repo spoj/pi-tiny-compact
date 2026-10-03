@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const MAX_SUMMARY_CHARS = 32_000;
-export const IDLE_MIN_TOKENS = 100_000;
+export const IDLE_MIN_TOKENS = 250_000;
 const DEFAULT_CACHE_TTL_SECONDS = 300;
 
 const LIMIT = {
