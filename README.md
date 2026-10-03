@@ -7,7 +7,7 @@ It makes no model calls. Pi chooses what history to compact and what recent cont
 ## Install
 
 ```bash
-pi install git:github.com/spoj/pi-tiny-compact@v0.4.0
+pi install git:github.com/spoj/pi-tiny-compact@v0.5.0
 ```
 
 ## Usage

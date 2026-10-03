@@ -1,6 +1,6 @@
 {
   "name": "pi-tiny-compact",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Small deterministic conversation compactor for Pi",
   "license": "MIT",
   "type": "module",
