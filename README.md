@@ -1,59 +1,65 @@
 # pi-tiny-compact
 
-A small deterministic conversation compactor for [Pi](https://github.com/earendil-works/pi).
+Waitless compaction for [Pi](https://github.com/earendil-works/pi).
 
-It makes no model calls. Pi chooses what history to compact and what recent context to retain; this extension only converts the discarded span into a bounded factual transcript. It also compacts large sessions once they have been idle long enough for the provider's prompt cache to expire.
+Pi compacts when the context crosses its threshold, then makes you wait while a summary is written. This extension writes the summary in the background before the threshold arrives, so compaction is instant when it does.
 
 ## Install
 
 ```bash
-pi install git:github.com/spoj/pi-tiny-compact@v0.5.0
+pi install git:github.com/spoj/pi-tiny-compact@v0.6.0
 ```
 
-## Usage
+## How it works
 
-Once installed, use Pi normally:
+1. When the context comes within `keepRecentTokens` of Pi's compaction threshold, the extension sends the agent's next request again with one user message appended, asking for a summary. Model, thinking level, system prompt, tools, and messages are unchanged, so the request reuses the agent's prompt cache, and the model summarizes the real conversation rather than a serialized transcript.
+2. You keep working. The footer shows `compact: running`, then `compact: ready`.
+3. When Pi's threshold triggers, the summary replaces everything up to the point where it started. The conversation since then, about `keepRecentTokens`, stays verbatim.
 
-```text
-/compact
+If the summary is still running at the threshold, compaction waits for it, as Pi's own compaction would. Esc stops waiting, and the summary keeps running for the next attempt. If there is no summary yet, one is written then. If writing it fails, or the context overflows before a summary exists, Pi's built-in compaction runs.
+
+Summaries use Pi's sections (Goal, Constraints & Preferences, Progress, Key Decisions, Next Steps, Critical Context). A later compaction updates the earlier summary rather than summarizing it. Each summary ends with the session file's path, so the agent can look up details that it dropped.
+
+## Settings
+
+Pi's own compaction settings drive everything:
+
+- Threshold: `contextWindow - reserveTokens` (default reserve 16,384)
+- Summary starts: `keepRecentTokens` earlier (default 20,000), which is also how much recent conversation stays verbatim and how long the summary has to finish
+- `enabled: false` turns off automatic compaction and background summaries
+
+For example, to compact a 1M-context model at 250,000 tokens and start its summary at 200,000:
+
+```json
+{
+  "compaction": {
+    "keepRecentTokens": 50000,
+    "modelOverrides": {
+      "anthropic/claude-opus-5-5": { "reserveTokens": 750000 }
+    }
+  }
+}
 ```
 
-The extension supplies the result for every compaction reason: manual `/compact`, automatic threshold compaction, overflow recovery, and [idle compaction](#idle-compaction). Pi still chooses the cut and retains recent context.
+## Manual compaction
 
-Focused compaction such as `/compact focus on auth` is cancelled with a warning because deterministic logic cannot interpret the focus request.
+`/compact` uses the ready summary, or writes one now. `/compact <focus>` always writes a fresh summary with that focus.
 
-The generated summary contains:
+## Idle sessions
 
-- the initial request when available;
-- a bounded inherited summary when taking over from another compactor;
-- files reported by Pi as read or modified;
-- user, assistant, tool-call, tool-result, custom-context, and shell records, in order.
+Providers keep a prompt cache for a few minutes, and the first request after it expires re-caches the whole context. When a session with a summary stays idle that long, the extension applies the summary first, so the next request re-caches the summary and recent messages instead.
 
-Tool results are retained with larger allowances for errors. Assistant thinking is omitted. Message text is indented beneath generated role headers so it cannot alter the persisted summary structure.
+The cache lifetime is the model's `promptCache` value for the active retention (`PI_CACHE_RETENTION=long` selects the long tier), or five minutes. Idle time counts from the last model response or cache-warming refresh.
 
-## Idle compaction
+## Compaction entries
 
-Providers keep a prompt cache for a few minutes. The first request after it expires pays to cache the whole context again, which is expensive for a large session. When a run ends and the session then stays idle for its cache lifetime, pi-tiny-compact compacts it if the context holds at least 250,000 tokens. The next request then re-caches the summary and recent messages instead of the full history.
+Each compaction records the summary call's `usage`, so session totals include it, and `details`:
 
-- The cache lifetime is the model's `promptCache` value for the active retention (`PI_CACHE_RETENTION=long` selects the long tier), or five minutes when the model declares none.
-- Idle time counts from the last model response or cache-warming refresh, so with `cacheWarming: "idle"` compaction waits until Pi stops warming the cache.
-- A new run restarts the idle time. Nothing happens when `compaction.enabled` is `false`.
-- The compacted entries stay in the session file; `/tree` returns to them with the full context.
+- `compactor`: `"pi-tiny-compact"`
+- `throughEntryId`: the last session entry the summary covers
+- `waitedMs`: how long compaction waited for the summary (`0` when it was ready)
 
-## Bounds
-
-- Complete summary: 32,000 characters
-- Initial request: 1,200 characters
-- Inherited summary: 3,000 characters
-- User or assistant record: 1,200 characters
-- Tool call: 500 characters
-- Successful tool result: 600 characters
-- Failed tool result: 1,200 characters
-- Remembered files: 50 per category
-
-When the summary reaches its limit, tool activity and custom context roll off first, then assistant text, then user messages, oldest first within each. User instructions therefore survive long tool-heavy runs and repeated compactions. The original session entries remain in Pi's session file, but this extension does not claim lossless recall.
-
-Repeated compactions merge structured state stored in the compaction entry's `details`; they never parse generated summary text.
+The compacted entries stay in the session file; `/tree` returns to them with the full context.
 
 ## Development
 

@@ -1,298 +1,174 @@
+import type { Message, Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export const MAX_SUMMARY_CHARS = 32_000;
-export const IDLE_MIN_TOKENS = 250_000;
+// Pi's built-in compaction defaults.
+const DEFAULT_RESERVE_TOKENS = 16_384;
+const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 const DEFAULT_CACHE_TTL_SECONDS = 300;
 
-const LIMIT = {
-  initial: 1_200,
-  inherited: 3_000,
-  message: 1_200,
-  tool: 500,
-  result: 600,
-  error: 1_200,
-  path: 240,
-  paths: 50,
-  pathSection: 1_500,
-};
+export const INSTRUCTION = `Summarize the conversation above for context compaction. Everything above will be replaced by your summary, and the work will continue from the summary alone.
 
-interface Preparation {
-  firstKeptEntryId: string;
-  messagesToSummarize: readonly unknown[];
-  turnPrefixMessages: readonly unknown[];
-  tokensBefore: number;
-  previousSummary?: string;
-  fileOps: {
-    read: Iterable<string>;
-    written: Iterable<string>;
-    edited: Iterable<string>;
-  };
+Reply with only the summary: no tool calls, no further work, no preamble. The summary describes the work, so leave out this request and its rules.
+
+If the conversation starts with an earlier compaction summary, carry forward what still matters, fold in what happened since, and drop what is obsolete.
+
+Use these sections and omit empty ones:
+
+## Goal
+## Constraints & Preferences
+## Progress
+### Done
+### In Progress
+### Blocked
+## Key Decisions
+## Next Steps
+## Critical Context
+
+Quote the user's instructions and preferences verbatim where wording matters. Preserve exact file paths, commands, identifiers, and error messages. Be concise.`;
+
+interface Snapshot {
+  leafId: string;
+  messages: Message[];
 }
 
-export interface TinyCompactDetails {
-  compactor: "pi-tiny-compact";
-  version: 1;
-  initialRequest: string;
-  inheritedSummary: string;
-  transcript: string[];
-  omittedEntries: number;
-  readFiles: string[];
-  modifiedFiles: string[];
+interface Summary {
+  text: string;
+  usage: Usage;
 }
 
-const recordLike = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
+interface Job {
+  leafId: string;
+  summary: Promise<Summary | undefined>;
+  controller: AbortController;
+}
 
-const clean = (text: string): string =>
-  text
-    .replace(/\r\n?/g, "\n")
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
-    .split("\n").map((line) => line.trimEnd()).join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-const clip = (text: string, max: number): string => {
-  const value = clean(text);
-  if (value.length <= max) return value;
-  const marker = "\n…[truncated]…\n";
-  const room = max - marker.length;
-  const head = Math.ceil(room / 2);
-  return value.slice(0, head) + marker + value.slice(-(room - head));
-};
-
-const label = (value: unknown): string =>
-  (typeof value === "string" ? value : "unknown")
-    .replace(/[^\p{L}\p{N}_.:-]+/gu, "_")
-    .slice(0, 60) || "unknown";
-
-const block = (name: string, body: string, max: number): string => {
-  const value = clip(body, max);
-  if (!value) return "";
-  return `[${label(name)}]\n${value.split("\n").map((line) => `  ${line}`).join("\n")}`;
-};
-
-const contentText = (content: unknown): string => {
-  if (typeof content === "string") return clean(content);
-  if (!Array.isArray(content)) return "";
-  return clean(content.flatMap((part) => {
-    if (!recordLike(part)) return [];
-    if (part.type === "text" && typeof part.text === "string") return [part.text];
-    if (part.type === "image") return [`[image: ${typeof part.mimeType === "string" ? part.mimeType : "unknown"}]`];
-    return [];
-  }).join("\n"));
-};
-
-const json = (value: unknown): string => {
-  try {
-    return JSON.stringify(value) ?? "";
-  } catch {
-    return "";
-  }
-};
-
-const toolArguments = (value: unknown): string => {
-  if (!recordLike(value)) return json(value);
-  for (const key of ["path", "file_path", "filePath", "file"]) {
-    if (typeof value[key] === "string") return `path: ${value[key]}`;
-  }
-  if (typeof value.command === "string") return `command: ${value.command}`;
-  if (typeof value.query === "string") return `query: ${value.query}`;
-  return json(value);
-};
-
-export const renderMessages = (messages: readonly unknown[]): string[] => {
-  const output: string[] = [];
-  const add = (name: string, body: string, max: number) => {
-    const value = block(name, body, max);
-    if (value) output.push(value);
-  };
-
-  for (const raw of messages) {
-    if (!recordLike(raw) || typeof raw.role !== "string") continue;
-
-    if (raw.role === "user") add("user", contentText(raw.content), LIMIT.message);
-
-    if (raw.role === "assistant") {
-      if (typeof raw.content === "string") add("assistant", raw.content, LIMIT.message);
-      if (Array.isArray(raw.content)) {
-        for (const part of raw.content) {
-          if (!recordLike(part)) continue;
-          if (part.type === "text" && typeof part.text === "string") add("assistant", part.text, LIMIT.message);
-          if (part.type === "toolCall") {
-            add(`tool:${label(part.name)}`, toolArguments(part.arguments) || "(no arguments)", LIMIT.tool);
-          }
-        }
-      }
-    }
-
-    if (raw.role === "toolResult") {
-      const failed = raw.isError === true;
-      add(
-        failed ? `tool-result:error:${label(raw.toolName)}` : `tool-result:${label(raw.toolName)}`,
-        contentText(raw.content),
-        failed ? LIMIT.error : LIMIT.result,
-      );
-    }
-
-    if (raw.role === "bashExecution") {
-      const failed = raw.exitCode !== 0;
-      const command = typeof raw.command === "string" ? `$ ${raw.command}` : "";
-      const result = typeof raw.output === "string" ? raw.output : "";
-      add(failed ? `bash:error:${raw.exitCode ?? "unknown"}` : "bash", [command, result].filter(Boolean).join("\n"), failed ? LIMIT.error : LIMIT.result);
-    }
-
-    if (raw.role === "custom") add(`context:${label(raw.customType)}`, contentText(raw.content), LIMIT.message);
-    if (raw.role === "branchSummary" && typeof raw.summary === "string") add("branch-summary", raw.summary, LIMIT.message);
-  }
-  return output;
-};
-
-const strings = (value: unknown): string[] =>
-  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-
-const previousDetails = (entries: readonly unknown[]): TinyCompactDetails | undefined => {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
-    if (!recordLike(entry) || entry.type !== "compaction") continue;
-    const value = entry.details;
-    if (!recordLike(value) || value.compactor !== "pi-tiny-compact" || value.version !== 1) return;
-    return {
-      compactor: "pi-tiny-compact",
-      version: 1,
-      initialRequest: clip(typeof value.initialRequest === "string" ? value.initialRequest : "", LIMIT.initial),
-      inheritedSummary: clip(typeof value.inheritedSummary === "string" ? value.inheritedSummary : "", LIMIT.inherited),
-      transcript: strings(value.transcript).map((item) => clip(item, 1_500)),
-      omittedEntries: typeof value.omittedEntries === "number" && Number.isSafeInteger(value.omittedEntries)
-        ? Math.max(0, value.omittedEntries)
-        : 0,
-      readFiles: strings(value.readFiles).slice(-LIMIT.paths),
-      modifiedFiles: strings(value.modifiedFiles).slice(-LIMIT.paths),
-    };
-  }
-};
-
-const path = (value: string): string => {
-  const oneLine = clean(value).replace(/\s+/g, " ");
-  if (oneLine.length <= LIMIT.path) return oneLine;
-  const half = Math.floor((LIMIT.path - 1) / 2);
-  return `${oneLine.slice(0, half)}…${oneLine.slice(-half)}`;
-};
-
-const mergePaths = (old: readonly string[], fresh: Iterable<string>): string[] => {
-  const merged: string[] = [];
-  for (const raw of [...old, ...fresh]) {
-    if (typeof raw !== "string") continue;
-    const value = path(raw);
-    if (!value) continue;
-    const duplicate = merged.indexOf(value);
-    if (duplicate >= 0) merged.splice(duplicate, 1);
-    merged.push(value);
-  }
-  return merged.slice(-LIMIT.paths);
-};
-
-const renderPaths = (paths: readonly string[]): string => {
-  const lines: string[] = [];
-  let size = 0;
-  for (let i = paths.length - 1; i >= 0; i--) {
-    const line = `- ${paths[i]}`;
-    if (size + line.length + 1 > LIMIT.pathSection) break;
-    lines.push(line);
-    size += line.length + 1;
-  }
-  lines.reverse();
-  const omitted = paths.length - lines.length;
-  if (omitted) lines.unshift(`- … ${omitted} older paths omitted`);
-  return lines.join("\n");
-};
-
-export const renderSummary = (details: TinyCompactDetails): string => {
-  const sections: string[] = [];
-  const indent = (value: string) => value.split("\n").map((line) => `  ${line}`).join("\n");
-
-  if (details.initialRequest) sections.push(`[Initial Request]\n${indent(details.initialRequest)}`);
-  if (details.inheritedSummary) sections.push(`[Inherited Summary]\n${indent(details.inheritedSummary)}`);
-
-  const files: string[] = [];
-  if (details.modifiedFiles.length) files.push(`Modified:\n${renderPaths(details.modifiedFiles)}`);
-  if (details.readFiles.length) files.push(`Read:\n${renderPaths(details.readFiles)}`);
-  if (files.length) sections.push(`[Files Touched]\n${files.join("\n\n")}`);
-
-  const transcript = [...details.transcript];
-  if (details.omittedEntries) transcript.unshift(`(${details.omittedEntries} compacted entries omitted)`);
-  sections.push(`[Compacted Transcript]\n${transcript.join("\n\n") || "(no textual entries)"}`);
-  return sections.join("\n\n");
-};
-
-const isUserText = (raw: unknown): raw is Record<string, unknown> =>
-  recordLike(raw) && raw.role === "user" && contentText(raw.content) !== "";
-
-// Every record starts with its generated header; message text is indented beneath it.
-const priority = (record: string): number =>
-  record.startsWith("[user]") ? 0 : /^\[(assistant|branch-summary)\]/.test(record) ? 1 : 2;
-
-const fit = (
-  base: Omit<TinyCompactDetails, "transcript" | "omittedEntries">,
-  records: readonly string[],
-  alreadyOmitted: number,
-): TinyCompactDetails => {
-  const kept = new Set<number>();
-  const details = (): TinyCompactDetails => {
-    const transcript = records.filter((_, i) => kept.has(i));
-    return { ...base, transcript, omittedEntries: alreadyOmitted + records.length - transcript.length };
-  };
-  for (const level of [0, 1, 2]) {
-    for (let i = records.length - 1; i >= 0; i--) {
-      if (priority(records[i]) !== level) continue;
-      kept.add(i);
-      if (renderSummary(details()).length <= MAX_SUMMARY_CHARS) continue;
-      kept.delete(i);
-      break;
-    }
-  }
-  return details();
-};
-
-export const buildTinyCompaction = (preparation: Preparation, entries: readonly unknown[]) => {
-  const previous = previousDetails(entries);
-  const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
-  const initial = previous || preparation.previousSummary ? undefined : messages.find(isUserText);
-  const modifiedFiles = mergePaths(previous?.modifiedFiles ?? [], [...preparation.fileOps.written, ...preparation.fileOps.edited]);
-  const modified = new Set(modifiedFiles);
-  const readFiles = mergePaths(previous?.readFiles ?? [], preparation.fileOps.read).filter((item) => !modified.has(item));
-  const base: Omit<TinyCompactDetails, "transcript" | "omittedEntries"> = {
-    compactor: "pi-tiny-compact",
-    version: 1,
-    initialRequest: previous?.initialRequest ?? (initial ? clip(contentText(initial.content), LIMIT.initial) : ""),
-    inheritedSummary: previous?.inheritedSummary ?? clip(preparation.previousSummary ?? "", LIMIT.inherited),
-    readFiles,
-    modifiedFiles,
-  };
-  const records = renderMessages(messages.filter((message) => message !== initial));
-  const details = fit(base, [...(previous?.transcript ?? []), ...records], previous?.omittedEntries ?? 0);
-  return {
-    summary: renderSummary(details),
-    firstKeptEntryId: preparation.firstKeptEntryId,
-    tokensBefore: preparation.tokensBefore,
-    details,
-  };
-};
-
-export default function tinyCompact(pi: ExtensionAPI) {
-  pi.on("session_before_compact", (event, ctx) => {
-    if (event.signal.aborted) return { cancel: true };
-    if (event.customInstructions?.trim()) {
-      ctx.ui.notify("pi-tiny-compact does not support focus instructions", "warning");
-      return { cancel: true };
-    }
-    return { compaction: buildTinyCompaction(event.preparation, event.branchEntries) };
+const untilAborted = (signal: AbortSignal) =>
+  new Promise<undefined>((resolve) => {
+    if (signal.aborted) resolve(undefined);
+    signal.addEventListener("abort", () => resolve(undefined), { once: true });
   });
 
-  // The first request after the prompt cache expires re-caches the whole context, so shrink it first.
+export default function tinyCompact(pi: ExtensionAPI) {
+  let latest: Snapshot | undefined;
+  let job: Job | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const compactWhenCacheExpires = (ctx: ExtensionContext) => {
+
+  // Pi compacts above contextWindow - reserveTokens. Starting keepRecentTokens earlier leaves that much
+  // conversation to keep verbatim, and that much time for the summary to finish.
+  const precomputeAt = (ctx: ExtensionContext, contextWindow: number) => {
+    const settings = pi.getSettings().compaction;
+    if (settings?.enabled === false || !ctx.model) return Infinity;
+    const override = settings?.modelOverrides?.[`${ctx.model.provider}/${ctx.model.id}`];
+    const reserve = override?.reserveTokens ?? settings?.reserveTokens ?? DEFAULT_RESERVE_TOKENS;
+    const keep = override?.keepRecentTokens ?? settings?.keepRecentTokens ?? DEFAULT_KEEP_RECENT_TOKENS;
+    return contextWindow - reserve - keep;
+  };
+
+  // The agent's next request plus one user message, so the prompt cache covers all but that message.
+  const summarize = async (
+    ctx: ExtensionContext,
+    snapshot: Snapshot,
+    focus: string | undefined,
+    signal: AbortSignal,
+  ): Promise<Summary> => {
+    const level = pi.getThinkingLevel();
+    const instruction: Message = {
+      role: "user",
+      content: focus ? `${INSTRUCTION}\n\nFocus the summary on: ${focus}` : INSTRUCTION,
+      timestamp: Date.now(),
+    };
+    const response = await ctx.modelRegistry
+      .streamSimple(ctx.model!, { messages: [...snapshot.messages, instruction] }, {
+        reasoning: level === "off" ? undefined : level,
+        sessionId: ctx.sessionManager.getSessionId(),
+        signal,
+      })
+      .result();
+    const text = response.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n").trim();
+    if (response.stopReason !== "stop" || !text) {
+      throw new Error(response.errorMessage ?? `the model stopped with "${response.stopReason}"`);
+    }
+    return { text, usage: response.usage };
+  };
+
+  const start = (ctx: ExtensionContext, snapshot: Snapshot): Job => {
+    const controller = new AbortController();
+    const started: Job = {
+      leafId: snapshot.leafId,
+      controller,
+      summary: summarize(ctx, snapshot, undefined, controller.signal).then(
+        (summary) => {
+          if (job === started) ctx.ui.setStatus("compact", "compact: ready");
+          return summary;
+        },
+        (error: Error) => {
+          if (job !== started) return undefined;
+          job = undefined;
+          ctx.ui.setStatus("compact", undefined);
+          ctx.ui.notify(`Background compaction failed: ${error.message}`, "warning");
+          return undefined;
+        },
+      ),
+    };
+    ctx.ui.setStatus("compact", "compact: running");
+    return started;
+  };
+
+  const reset = (ctx: ExtensionContext) => {
+    job?.controller.abort();
+    job = undefined;
+    latest = undefined;
+    ctx.ui.setStatus("compact", undefined);
+  };
+
+  pi.on("turn_end", (event, ctx) => {
+    if (event.outcome !== "completed") return;
+    latest = { leafId: ctx.sessionManager.getLeafId()!, messages: event.context.llmMessages };
+    const usage = ctx.getContextUsage();
+    if (!job && usage?.tokens != null && usage.tokens > precomputeAt(ctx, usage.contextWindow)) job = start(ctx, latest);
+  });
+
+  pi.on("session_before_compact", async (event, ctx) => {
+    const focus = event.customInstructions?.trim();
+    const waitStart = Date.now();
+    let throughEntryId: string;
+    let summary: Summary | undefined;
+    if (focus) {
+      if (!latest) return;
+      throughEntryId = latest.leafId;
+      summary = await summarize(ctx, latest, focus, event.signal).catch(() => undefined);
+    } else {
+      // On overflow the latest snapshot may not fit either; only an earlier, running summary helps.
+      if (!job && latest && event.reason !== "overflow") job = start(ctx, latest);
+      if (!job) return;
+      throughEntryId = job.leafId;
+      // Esc stops waiting; the summary keeps running for the next attempt.
+      summary = await Promise.race([job.summary, untilAborted(event.signal)]);
+    }
+    if (!summary) return;
+
+    const index = event.branchEntries.findIndex((entry) => entry.id === throughEntryId);
+    if (index < 0) return;
+    const file = ctx.sessionManager.getSessionFile();
+    return {
+      compaction: {
+        summary: file && !summary.text.includes(file)
+          ? `${summary.text}\n\nFull transcript before this summary: ${file}`
+          : summary.text,
+        // null keeps nothing; Pi records the compaction's own id.
+        firstKeptEntryId: (event.branchEntries[index + 1]?.id ?? null) as string,
+        tokensBefore: event.preparation.tokensBefore,
+        usage: summary.usage,
+        details: { compactor: "pi-tiny-compact", throughEntryId, waitedMs: Date.now() - waitStart },
+      },
+    };
+  });
+
+  // The first request after the prompt cache expires re-caches the whole context, so apply the summary first.
+  const applyWhenCacheExpires = (ctx: ExtensionContext) => {
     clearTimeout(timer);
+    const pending = job;
+    if (!pending) return;
     const lastCacheUse = ctx.sessionManager.getBranch().findLast((entry) =>
       (entry.type === "message" && entry.message.role === "assistant") ||
       (entry.type === "usage" && entry.kind === "cache_warm"));
@@ -301,14 +177,21 @@ export default function tinyCompact(pi: ExtensionAPI) {
     const ttl = ctx.model?.promptCache?.[retention] ?? DEFAULT_CACHE_TTL_SECONDS;
     const wait = Date.parse(lastCacheUse.timestamp) + ttl * 1000 - Date.now();
     if (wait > 0) {
-      timer = setTimeout(() => compactWhenCacheExpires(ctx), wait);
+      timer = setTimeout(() => applyWhenCacheExpires(ctx), wait);
       timer.unref();
       return;
     }
-    if (!ctx.isIdle() || pi.getSettings().compaction?.enabled === false) return;
-    if ((ctx.getContextUsage()?.tokens ?? 0) < IDLE_MIN_TOKENS) return;
-    ctx.compact({ onComplete: () => ctx.ui.notify("Compacted the idle session because its prompt cache expired", "info") });
+    void pending.summary.then((summary) => {
+      if (!summary || job !== pending || !ctx.isIdle()) return;
+      ctx.compact({ onComplete: () => ctx.ui.notify("Compacted the idle session because its prompt cache expired", "info") });
+    });
   };
-  pi.on("agent_settled", (_event, ctx) => compactWhenCacheExpires(ctx));
-  pi.on("session_shutdown", () => clearTimeout(timer));
+
+  pi.on("agent_settled", (_event, ctx) => applyWhenCacheExpires(ctx));
+  pi.on("session_compact", (_event, ctx) => reset(ctx));
+  pi.on("session_tree", (_event, ctx) => reset(ctx));
+  pi.on("session_shutdown", (_event, ctx) => {
+    clearTimeout(timer);
+    reset(ctx);
+  });
 }
