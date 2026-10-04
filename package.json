@@ -1,6 +1,6 @@
 {
   "name": "pi-tiny-compact",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Waitless compaction for Pi: summaries written in the background on the session's prompt cache",
   "license": "MIT",
   "type": "module",
