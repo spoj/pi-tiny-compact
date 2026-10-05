@@ -7,7 +7,7 @@ Pi's own compaction and branch summaries send a serialized transcript to a separ
 ## Install
 
 ```bash
-pi install git:github.com/spoj/pi-tiny-compact@v0.8.0
+pi install git:github.com/spoj/pi-tiny-compact@v0.9.0
 ```
 
 ## How it works
