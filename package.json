@@ -1,6 +1,6 @@
 {
   "name": "pi-tiny-compact",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Compaction for Pi that summarizes on the session's prompt cache, usually in the background before it's needed",
   "license": "MIT",
   "type": "module",
