@@ -28,6 +28,8 @@ Quote the user's instructions and preferences verbatim where wording matters. Pr
 
 export const INSTRUCTION = `Summarize the conversation above for context compaction. Everything above will be replaced by your summary, and the work will continue from the summary alone.
 
+Start the summary with a title line, \`# <title>\`, that names in a few words what the conversation is about now.
+
 ${RULES}`;
 
 export const branchInstruction = (opening: string) => `Summarize the branch of the conversation from the message that starts «${opening}» to the end. The user is leaving this branch, and your summary will replace it; the conversation before that message stays. Leaving the branch does not undo its changes to files or other state, so record them.
@@ -167,6 +169,13 @@ export default function tinyCompact(pi: ExtensionAPI) {
     }
     if (!summary) return { cancel: true };
 
+    // Rename only a session with no name or the name this extension set last, never one the user set.
+    // Its compaction entries, on any branch, record the names it sets, so this survives restarts.
+    const title = summary.text.match(/^# (.+)/m)?.[1].trim();
+    const name = ctx.sessionManager.getSessionName();
+    const lastSet = ctx.sessionManager.getEntries()
+      .map((entry) => entry.type === "compaction" && (entry.details as { sessionName?: string } | undefined)?.sessionName)
+      .findLast(Boolean);
     const file = ctx.sessionManager.getSessionFile();
     const pointer = `Full transcript before this summary: ${file}`;
     return {
@@ -175,7 +184,11 @@ export default function tinyCompact(pi: ExtensionAPI) {
         firstKeptEntryId: summary.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
         usage: summary.usage,
-        details: { compactor: "pi-tiny-compact", waitedMs: Date.now() - waitStart },
+        details: {
+          compactor: "pi-tiny-compact",
+          waitedMs: Date.now() - waitStart,
+          sessionName: title && (!name || name === lastSet) ? title : undefined,
+        },
       },
     };
   });
@@ -243,7 +256,12 @@ export default function tinyCompact(pi: ExtensionAPI) {
   };
 
   pi.on("agent_settled", (_event, ctx) => applyWhenCacheExpires(ctx));
-  pi.on("session_compact", (_event, ctx) => reset(ctx));
+  // Rename once Pi has saved the compaction, so every name this extension sets is on record.
+  pi.on("session_compact", (event, ctx) => {
+    reset(ctx);
+    const name = (event.compactionEntry.details as { sessionName?: string } | undefined)?.sessionName;
+    if (name) pi.setSessionName(name);
+  });
   pi.on("session_tree", (_event, ctx) => reset(ctx));
   pi.on("session_shutdown", (_event, ctx) => {
     clearTimeout(timer);

@@ -14,13 +14,15 @@ const entry = (id: string, role: string, content: unknown = id) => ({
 // The last model request: everything before its response, a2.
 const lastRequest = [entry("s", "system"), entry("u", "user"), entry("a1", "assistant"), entry("r1", "toolResult")];
 
-const session = () => {
+// file: the session file's entries, which outlive the extension across restarts.
+const session = (file: any[] = []) => {
   const handlers: Record<string, (event: any, ctx: any) => any> = {};
   const settings: Record<string, any> = { compaction: { keepRecentTokens: 50_000 } };
   tinyCompact({
     on: (name: string, handler: (event: any, ctx: any) => any) => { handlers[name] = handler; },
     getSettings: () => settings,
     getThinkingLevel: () => "high",
+    setSessionName: (name: string) => { file.push({ type: "session_info", name }); },
   } as never);
 
   const requests: Array<{ context: any; options: any; finish: (response: unknown) => void }> = [];
@@ -41,6 +43,8 @@ const session = () => {
       getBranch: () => state.branch,
       getSessionId: () => "session-1",
       getSessionFile: () => "/sessions/s.jsonl",
+      getEntries: () => file,
+      getSessionName: () => file.findLast((entry) => entry.type === "session_info")?.name,
     },
     getContextUsage: () => ({ tokens: state.tokens, contextWindow: 272_000 }),
     modelRegistry: {
@@ -65,12 +69,21 @@ const session = () => {
       state.tokens = tokens;
       handlers.turn_end({ outcome }, ctx);
     },
-    compact: (event: Record<string, unknown> = {}) => handlers.session_before_compact({
-      reason: "threshold",
-      signal: new AbortController().signal,
-      preparation: { tokensBefore: 260_000 },
-      ...event,
-    }, ctx),
+    // As in Pi, a compaction is saved before session_compact fires.
+    compact: async (event: Record<string, unknown> = {}) => {
+      const result = await handlers.session_before_compact({
+        reason: "threshold",
+        signal: new AbortController().signal,
+        preparation: { tokensBefore: 260_000 },
+        ...event,
+      }, ctx);
+      if (result.compaction) {
+        const compactionEntry = { type: "compaction", ...result.compaction };
+        file.push(compactionEntry);
+        handlers.session_compact({ compactionEntry }, ctx);
+      }
+      return result;
+    },
     leave: (targetId: string, leaving: string[], preparation: Record<string, unknown> = {}, signal = new AbortController().signal) =>
       handlers.session_before_tree({
         preparation: {
@@ -138,9 +151,40 @@ test("the threshold applies the ready summary instantly and keeps everything fro
   assert.deepEqual(compaction.usage, usage);
   assert.equal(compaction.details.compactor, "pi-tiny-compact");
   assert.ok(compaction.details.waitedMs < 1_000);
-
-  await s.handlers.session_compact({}, s.ctx);
   assert.equal(s.state.status, undefined);
+});
+
+test("a compaction names the session with the summary's title line, which stays in the summary", async () => {
+  const s = session();
+  const compacting = s.compact();
+  await s.reply("# Auth flow\n## Goal\nShip it");
+  const { compaction } = await compacting;
+  assert.equal(compaction.summary, "# Auth flow\n## Goal\nShip it\n\nFull transcript before this summary: /sessions/s.jsonl");
+  assert.equal(compaction.details.sessionName, "Auth flow");
+  assert.equal(s.ctx.sessionManager.getSessionName(), "Auth flow");
+});
+
+test("renames only a session with no name or the name it set last, also after restarts", async () => {
+  // Each compaction runs in a new extension on the same session file.
+  const compact = async (file: any[], reply: string) => {
+    const s = session(file);
+    const compacting = s.compact();
+    await s.reply(reply);
+    await compacting;
+    return s.ctx.sessionManager.getSessionName();
+  };
+  const file: any[] = [];
+  assert.equal(await compact(file, "# Auth flow\n## Goal"), "Auth flow");
+  assert.equal(await compact(file, "## Goal"), "Auth flow");
+  assert.equal(await compact(file, "# Login bug\n## Goal"), "Login bug");
+  file.push({ type: "session_info", name: "Mine" });
+  assert.equal(await compact(file, "# Token refresh\n## Goal"), "Mine");
+  assert.deepEqual(
+    file.filter((entry) => entry.type === "compaction").map((entry) => entry.details.sessionName),
+    ["Auth flow", undefined, "Login bug", undefined],
+  );
+
+  assert.equal(await compact([{ type: "session_info", name: "From --name" }], "# Auth flow\n## Goal"), "From --name");
 });
 
 test("without a background summary, writes one now the same way, which fits even after an overflow", async () => {
@@ -233,7 +277,7 @@ const branch = () => [
   call("c2", "pwd"), entry("r2", "toolResult"), entry("a2", "assistant"),
 ];
 
-test("a branch summary resends the whole branch with one message quoting where the branch starts", async () => {
+test("a branch summary resends the whole branch with one message quoting where the branch starts, and renames nothing", async () => {
   const s = session();
   s.state.entries = branch();
   const leaving = s.leave("a1", ["s2", "u2", "c1", "r1", "c2", "r2", "a2"]);
@@ -242,14 +286,16 @@ test("a branch summary resends the whole branch with one message quoting where t
   assert.equal(context.messages.at(-1).content, branchInstruction("u2"));
   assert.equal(options.reasoning, "high");
 
-  await s.reply("## Goal\nTry Redis");
+  await s.reply("# Redis\n## Goal\nTry Redis");
   assert.deepEqual(await leaving, {
     summary: {
-      summary: "## Goal\nTry Redis\n\nFull transcript of this branch: /sessions/s.jsonl, ending at entry a2",
+      summary: "# Redis\n## Goal\nTry Redis\n\nFull transcript of this branch: /sessions/s.jsonl, ending at entry a2",
       usage,
       details: { compactor: "pi-tiny-compact" },
     },
   });
+  s.handlers.session_tree({}, s.ctx);
+  assert.equal(s.ctx.sessionManager.getSessionName(), undefined);
 });
 
 test("a selected user message leaves with its branch, and a branch can start with a tool call", () => {
