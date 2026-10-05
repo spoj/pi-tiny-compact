@@ -116,7 +116,7 @@ test("starts keepRecentTokens before Pi's threshold, as the last model request p
   assert.equal(context.messages.at(-1).content, INSTRUCTION);
   assert.equal(options.reasoning, "high");
   assert.equal(options.sessionId, "session-1");
-  assert.equal(s.state.status, "compact: running");
+  assert.equal(s.state.status, "compact:running");
 
   s.turnEnd(250_000);
   assert.equal(s.requests.length, 1);
@@ -140,7 +140,7 @@ test("the threshold applies the ready summary instantly and keeps everything fro
   const s = session();
   s.turnEnd(210_000);
   await s.reply("## Goal\nShip it");
-  assert.equal(s.state.status, "compact: ready");
+  assert.equal(s.state.status, "compact:ready");
 
   s.state.entries.push(entry("a3", "assistant"), entry("r3", "toolResult"));
   const { compaction } = await s.compact();

@@ -127,7 +127,7 @@ export default function tinyCompact(pi: ExtensionAPI) {
       controller,
       summary: compactionSummary(ctx, undefined, controller.signal).then(
         (summary) => {
-          if (job === started) ctx.ui.setStatus("compact", "compact: ready");
+          if (job === started) ctx.ui.setStatus("compact", "compact:ready");
           return summary;
         },
         () => {
@@ -138,7 +138,7 @@ export default function tinyCompact(pi: ExtensionAPI) {
         },
       ),
     };
-    ctx.ui.setStatus("compact", "compact: running");
+    ctx.ui.setStatus("compact", "compact:running");
     return started;
   };
 
