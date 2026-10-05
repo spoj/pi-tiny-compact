@@ -338,7 +338,8 @@ test("leaves without a summary unless asked, and cancels with a warning instead 
 const idle = (t: any) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const s = session();
-  s.state.branch = [{ id: "a", type: "message", message: { role: "assistant" }, timestamp: new Date(0).toISOString() }];
+  // The last request was sent at 0, and its response finished a minute later.
+  s.state.branch = [{ id: "a", type: "message", message: { role: "assistant", timestamp: 0 }, timestamp: new Date(60_000).toISOString() }];
   s.turnEnd(210_000);
   return s;
 };
@@ -355,6 +356,29 @@ test("applies the summary when the idle prompt cache expires, after cache-warmin
   t.mock.timers.tick(1);
   await flush();
   assert.equal(s.state.compactions, 1);
+});
+
+test("times the idle prompt cache from when the last request was sent, not when its response finished", async (t) => {
+  const s = idle(t);
+  await s.reply("Summary");
+  t.mock.timers.tick(60_000);
+  s.handlers.agent_settled({}, s.ctx);
+  t.mock.timers.tick(239_999);
+  await flush();
+  assert.equal(s.state.compactions, 0);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(s.state.compactions, 1);
+});
+
+test("leaves idle sessions alone on models without a prompt cache lifetime", async (t) => {
+  const s = idle(t);
+  s.ctx.model = { provider: "openai-codex", id: "gpt" } as any;
+  await s.reply("Summary");
+  s.handlers.agent_settled({}, s.ctx);
+  t.mock.timers.tick(3_600_000);
+  await flush();
+  assert.equal(s.state.compactions, 0);
 });
 
 test("idle compaction waits for a running summary and skips busy sessions", async (t) => {

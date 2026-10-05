@@ -6,7 +6,6 @@ const DEFAULT_RESERVE_TOKENS = 16_384;
 const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 2_000;
-const DEFAULT_CACHE_TTL_SECONDS = 300;
 
 const RULES = `Reply with only the summary: no tool calls, no further work, no preamble. The summary describes the work, so leave out this request and its rules.
 
@@ -237,13 +236,16 @@ export default function tinyCompact(pi: ExtensionAPI) {
     clearTimeout(timer);
     const pending = job;
     if (!pending) return;
+    const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
+    const ttl = ctx.model?.promptCache?.[retention];
+    if (ttl === undefined) return;
     const lastCacheUse = ctx.sessionManager.getBranch().findLast((entry) =>
       (entry.type === "message" && entry.message.role === "assistant") ||
       (entry.type === "usage" && entry.kind === "cache_warm"));
     if (!lastCacheUse) return;
-    const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
-    const ttl = ctx.model?.promptCache?.[retention] ?? DEFAULT_CACHE_TTL_SECONDS;
-    const wait = Date.parse(lastCacheUse.timestamp) + ttl * 1000 - Date.now();
+    // As Pi's cache warming does: a response from when its request was sent, a refresh from when it finished.
+    const usedAt = lastCacheUse.type === "message" ? lastCacheUse.message.timestamp : Date.parse(lastCacheUse.timestamp);
+    const wait = usedAt + ttl * 1000 - Date.now();
     if (wait > 0) {
       timer = setTimeout(() => applyWhenCacheExpires(ctx), wait);
       timer.unref();

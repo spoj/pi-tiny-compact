@@ -58,6 +58,8 @@ The summary is written when you leave, because the destination isn't known befor
 
 Providers keep a prompt cache for a few minutes, and the first request after it expires re-caches the whole context. When a session with a summary stays idle that long, the extension applies the summary first, so the next request re-caches the summary and recent messages instead.
 
+The cache lifetime is the model's `promptCache` for the retention in use (`PI_CACHE_RETENTION`), counted as Pi's cache warming counts it: from when the last request was sent, or from the last refresh. A model without one is not compacted for idleness, as Pi doesn't warm its cache either; a `modelOverrides` entry in `models.json` can declare it.
+
 The cache lifetime is the model's `promptCache` value for the active retention (`PI_CACHE_RETENTION=long` selects the long tier), or five minutes. Idle time counts from the last model response or cache-warming refresh.
 
 ## Session names
