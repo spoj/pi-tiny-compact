@@ -171,7 +171,7 @@ export default function tinyCompact(pi: ExtensionAPI) {
 
     // Rename only a session with no name or the name this extension set last, never one the user set.
     // Its compaction entries, on any branch, record the names it sets, so this survives restarts.
-    const title = summary.text.match(/^# (.+)/m)?.[1].trim();
+    const title = summary.text.match(/^# (.+)/)?.[1].trim();
     const name = ctx.sessionManager.getSessionName();
     const lastSet = ctx.sessionManager.getEntries()
       .map((entry) => entry.type === "compaction" && (entry.details as { sessionName?: string } | undefined)?.sessionName)
