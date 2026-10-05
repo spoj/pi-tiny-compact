@@ -1,32 +1,35 @@
 # pi-tiny-compact
 
-Waitless compaction for [Pi](https://github.com/earendil-works/pi).
+Compaction for [Pi](https://github.com/earendil-works/pi) that summarizes on the session's prompt cache.
 
-Pi compacts when the context crosses its threshold, then makes you wait while a summary is written. This extension writes the summary in the background before the threshold arrives, so compaction is instant when it does.
+Pi's own compaction sends a serialized transcript to a separate summarizer prompt, so the request is uncached, and you wait while it runs. This extension writes every compaction instead: the summary request is the conversation itself, so it reuses the agent's prompt cache, and it is usually written in the background before Pi's threshold arrives.
 
 ## Install
 
 ```bash
-pi install git:github.com/spoj/pi-tiny-compact@v0.6.0
+pi install git:github.com/spoj/pi-tiny-compact@v0.7.0
 ```
 
 ## How it works
 
-1. When the context comes within `keepRecentTokens` of Pi's compaction threshold, the extension sends the agent's next request again with one user message appended, asking for a summary. Model, thinking level, system prompt, tools, and messages are unchanged, so the request reuses the agent's prompt cache, and the model summarizes the real conversation rather than a serialized transcript.
-2. You keep working. The footer shows `compact: running`, then `compact: ready`.
-3. When Pi's threshold triggers, the summary replaces everything up to the point where it started. The conversation since then, about `keepRecentTokens`, stays verbatim.
+A summary resends the input of the last model request with one user message appended, asking for a summary. Model, thinking level, system prompt, tools, and messages are unchanged, so the prompt cache covers all but that message, and the model summarizes the real conversation rather than a serialized transcript. The request fits the context window because the last one did, even after a context overflow. The summary replaces everything before the last response; that response and everything after it stay verbatim.
 
-If the summary is still running at the threshold, compaction waits for it, as Pi's own compaction would. Esc stops waiting, and the summary keeps running for the next attempt. If there is no summary yet, one is written then. If writing it fails, or the context overflows before a summary exists, Pi's built-in compaction runs.
+When the context comes within `keepRecentTokens` of Pi's compaction threshold, the extension writes a summary in the background, and the footer shows `compact: running`, then `compact: ready`. When the threshold triggers, the ready summary applies instantly, and the conversation since it started, about `keepRecentTokens`, stays verbatim. If it is still running, compaction waits for it; Esc stops waiting, and it keeps running for the next attempt. If it failed, or there is none, compaction writes one then.
+
+Summary requests that fail transiently are retried per Pi's `retry` settings. If a summary still fails, the compaction is cancelled with a warning, and Pi's own compaction never runs. At the threshold, Pi tries again on the next turn; after a context overflow, the run stops, so run `/compact`, then continue.
+
+The summary request skips extensions' `context` and `before_provider_request` handlers. If those change the agent's requests, summaries miss the prompt cache.
 
 Summaries use Pi's sections (Goal, Constraints & Preferences, Progress, Key Decisions, Next Steps, Critical Context). A later compaction updates the earlier summary rather than summarizing it. Each summary ends with the session file's path, so the agent can look up details that it dropped.
 
 ## Settings
 
-Pi's own compaction settings drive everything:
+Pi's own settings drive everything:
 
 - Threshold: `contextWindow - reserveTokens` (default reserve 16,384)
 - Summary starts: `keepRecentTokens` earlier (default 20,000), which is also how much recent conversation stays verbatim and how long the summary has to finish
 - `enabled: false` turns off automatic compaction and background summaries
+- `retry` (`enabled`, `maxRetries`, `baseDelayMs`, `maxAgentDelayMs`) applies to summary requests as to the agent's own
 
 For example, to compact a 1M-context model at 250,000 tokens and start its summary at 200,000:
 
@@ -56,7 +59,6 @@ The cache lifetime is the model's `promptCache` value for the active retention (
 Each compaction records the summary call's `usage`, so session totals include it, and `details`:
 
 - `compactor`: `"pi-tiny-compact"`
-- `throughEntryId`: the last session entry the summary covers
 - `waitedMs`: how long compaction waited for the summary (`0` when it was ready)
 
 The compacted entries stay in the session file; `/tree` returns to them with the full context.
@@ -64,5 +66,6 @@ The compacted entries stay in the session file; `/tree` returns to them with the
 ## Development
 
 ```bash
+npm ci
 npm test
 ```

@@ -7,6 +7,10 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 // codex: 272,000 window - 16,384 default reserve - 50,000 keepRecentTokens
 const PRECOMPUTE_AT = 205_616;
 
+const entry = (id: string, role: string) => ({ sourceEntry: { id }, messages: [{ role, content: id, timestamp: 0 }] });
+// The last model request: everything before its response, a2.
+const lastRequest = [entry("s", "system"), entry("u", "user"), entry("a1", "assistant"), entry("r1", "toolResult")];
+
 const session = () => {
   const handlers: Record<string, (event: any, ctx: any) => any> = {};
   const settings: Record<string, any> = { compaction: { keepRecentTokens: 50_000 } };
@@ -19,7 +23,8 @@ const session = () => {
   const requests: Array<{ context: any; options: any; finish: (response: unknown) => void }> = [];
   const state = {
     tokens: 0,
-    branch: [{ id: "a" }, { id: "b" }] as any[],
+    entries: [...lastRequest, entry("a2", "assistant"), entry("r2", "toolResult")] as any[],
+    branch: [] as any[],
     idle: true,
     status: undefined as string | undefined,
     notes: [] as string[],
@@ -28,7 +33,7 @@ const session = () => {
   const ctx = {
     model: { provider: "openai-codex", id: "gpt", promptCache: { short: 300, long: 3600 } },
     sessionManager: {
-      getLeafId: () => state.branch.at(-1).id,
+      buildSessionProjection: () => ({ entries: state.entries }),
       getBranch: () => state.branch,
       getSessionId: () => "session-1",
       getSessionFile: () => "/sessions/s.jsonl",
@@ -49,29 +54,27 @@ const session = () => {
     isIdle: () => state.idle,
     compact: () => { state.compactions++; },
   };
-  const llmMessages = [{ role: "system", content: "prompt" }, { role: "user", content: "build it" }];
 
   return {
-    handlers, settings, state, ctx, requests, llmMessages,
+    handlers, settings, state, ctx, requests,
     turnEnd: (tokens: number, outcome = "completed") => {
       state.tokens = tokens;
-      handlers.turn_end({ outcome, context: { llmMessages } }, ctx);
+      handlers.turn_end({ outcome }, ctx);
     },
     compact: (event: Record<string, unknown> = {}) => handlers.session_before_compact({
       reason: "threshold",
       signal: new AbortController().signal,
-      branchEntries: state.branch,
       preparation: { tokensBefore: 260_000 },
       ...event,
     }, ctx),
-    reply: async (text: string, stopReason = "stop") => {
-      requests.at(-1)!.finish({ content: [{ type: "text", text }], stopReason, usage, errorMessage: stopReason === "error" ? "rate limited" : undefined });
+    reply: async (text: string, stopReason = "stop", errorMessage?: string) => {
+      requests.at(-1)!.finish({ content: [{ type: "text", text }], stopReason, usage, errorMessage });
       await flush();
     },
   };
 };
 
-test("starts keepRecentTokens before Pi's threshold, as the agent's next request plus one message", () => {
+test("starts keepRecentTokens before Pi's threshold, as the last model request plus one message", () => {
   const s = session();
   s.turnEnd(PRECOMPUTE_AT);
   s.turnEnd(PRECOMPUTE_AT + 1, "error");
@@ -80,7 +83,7 @@ test("starts keepRecentTokens before Pi's threshold, as the agent's next request
   s.turnEnd(PRECOMPUTE_AT + 1);
   assert.equal(s.requests.length, 1);
   const { context, options } = s.requests[0];
-  assert.deepEqual(context.messages.slice(0, -1), s.llmMessages);
+  assert.deepEqual(context.messages.slice(0, -1), lastRequest.flatMap((entry) => entry.messages));
   assert.equal(context.messages.at(-1).role, "user");
   assert.equal(context.messages.at(-1).content, INSTRUCTION);
   assert.equal(options.reasoning, "high");
@@ -105,33 +108,67 @@ test("follows Pi's per-model compaction settings", () => {
   assert.equal(disabled.requests.length, 0);
 });
 
-test("the threshold applies the ready summary instantly and keeps everything after it", async () => {
+test("the threshold applies the ready summary instantly and keeps everything from the last response it saw", async () => {
   const s = session();
   s.turnEnd(210_000);
   await s.reply("## Goal\nShip it");
   assert.equal(s.state.status, "compact: ready");
 
-  s.state.branch.push({ id: "c" }, { id: "d" });
+  s.state.entries.push(entry("a3", "assistant"), entry("r3", "toolResult"));
   const { compaction } = await s.compact();
+  assert.equal(s.requests.length, 1);
   assert.equal(compaction.summary, "## Goal\nShip it\n\nFull transcript before this summary: /sessions/s.jsonl");
-  assert.equal(compaction.firstKeptEntryId, "c");
+  assert.equal(compaction.firstKeptEntryId, "a2");
   assert.equal(compaction.tokensBefore, 260_000);
   assert.deepEqual(compaction.usage, usage);
-  assert.equal(compaction.details.throughEntryId, "b");
+  assert.equal(compaction.details.compactor, "pi-tiny-compact");
   assert.ok(compaction.details.waitedMs < 1_000);
 
   await s.handlers.session_compact({}, s.ctx);
   assert.equal(s.state.status, undefined);
-  assert.equal(await s.compact({ reason: "overflow" }), undefined);
 });
 
-test("keeps nothing when the summary covers the whole context, and never repeats the transcript path", async () => {
+test("without a background summary, writes one now the same way, which fits even after an overflow", async () => {
+  const s = session();
+  s.turnEnd(100_000);
+  const compacting = s.compact({ reason: "overflow" });
+  assert.equal(s.requests.length, 1);
+  assert.deepEqual(s.requests[0].context.messages.slice(0, -1), lastRequest.flatMap((entry) => entry.messages));
+
+  await s.reply("Summary\n\nFull transcript before this summary: /sessions/s.jsonl");
+  const { compaction } = await compacting;
+  assert.equal(compaction.firstKeptEntryId, "a2");
+  assert.equal(compaction.summary.match(/s\.jsonl/g)?.length, 1);
+});
+
+test("a failed background summary is dropped quietly, and compaction writes its own", async () => {
   const s = session();
   s.turnEnd(210_000);
-  await s.reply("Summary\n\nFull transcript before this summary: /sessions/s.jsonl");
-  const { compaction } = await s.compact({ reason: "manual" });
-  assert.equal(compaction.firstKeptEntryId, null);
-  assert.equal(compaction.summary.match(/s\.jsonl/g)?.length, 1);
+  await s.reply("", "error", "invalid request");
+  assert.equal(s.state.status, undefined);
+  assert.deepEqual(s.state.notes, []);
+
+  const compacting = s.compact();
+  assert.equal(s.requests.length, 2);
+  await s.reply("Summary");
+  assert.match((await compacting).compaction.summary, /^Summary/);
+});
+
+test("retries per Pi's retry settings, then cancels with a warning instead of running Pi's compaction", async () => {
+  const s = session();
+  s.settings.retry = { maxRetries: 1, baseDelayMs: 1 };
+  const compacting = s.compact({ reason: "manual" });
+  await s.reply("", "error", "rate limited");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(s.requests.length, 2);
+  await s.reply("", "error", "rate limited");
+  assert.deepEqual(await compacting, { cancel: true });
+  assert.deepEqual(s.state.notes, ["Compaction failed: rate limited"]);
+
+  s.state.entries = [entry("s", "system"), entry("u", "user")];
+  assert.deepEqual(await s.compact({ reason: "overflow" }), { cancel: true });
+  assert.equal(s.requests.length, 2);
+  assert.equal(s.state.notes[1], "Compaction failed: there is no model response to summarize up to");
 });
 
 test("waits for a running summary; Esc stops waiting but keeps it running", async () => {
@@ -140,27 +177,14 @@ test("waits for a running summary; Esc stops waiting but keeps it running", asyn
   const esc = new AbortController();
   const waiting = s.compact({ signal: esc.signal });
   esc.abort();
-  assert.equal(await waiting, undefined);
+  assert.deepEqual(await waiting, { cancel: true });
   assert.equal(s.requests[0].options.signal.aborted, false);
+  assert.deepEqual(s.state.notes, []);
 
   const waitingAgain = s.compact();
   await s.reply("Summary");
   assert.match((await waitingAgain).compaction.summary, /^Summary/);
   assert.equal(s.requests.length, 1);
-});
-
-test("without a summary, writes one now, and falls back to Pi's compaction when that fails or the context overflowed", async () => {
-  const s = session();
-  s.turnEnd(100_000);
-  assert.equal(await s.compact({ reason: "overflow" }), undefined);
-  assert.equal(s.requests.length, 0);
-
-  const waiting = s.compact({ reason: "manual" });
-  assert.equal(s.requests.length, 1);
-  await s.reply("", "error");
-  assert.equal(await waiting, undefined);
-  assert.match(s.state.notes[0], /Background compaction failed: rate limited/);
-  assert.equal(s.state.status, undefined);
 });
 
 test("a focused /compact writes a fresh summary with that focus", async () => {
@@ -175,13 +199,12 @@ test("a focused /compact writes a fresh summary with that focus", async () => {
   assert.match((await focused).compaction.summary, /^Auth summary/);
 });
 
-test("tree navigation discards the summary until the next turn", async () => {
+test("tree navigation discards the background summary until the next turn", () => {
   const s = session();
   s.turnEnd(210_000);
   s.handlers.session_tree({}, s.ctx);
   assert.equal(s.requests[0].options.signal.aborted, true);
   assert.equal(s.state.status, undefined);
-  assert.equal(await s.compact(), undefined);
 
   s.turnEnd(210_000);
   assert.equal(s.requests.length, 2);

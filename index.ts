@@ -1,9 +1,11 @@
-import type { Message, Usage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { retryAssistantCall, type Message, type Usage } from "@earendil-works/pi-ai";
+import { convertToLlm, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-// Pi's built-in compaction defaults.
+// Pi's built-in defaults.
 const DEFAULT_RESERVE_TOKENS = 16_384;
 const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_RETRY_BASE_DELAY_MS = 2_000;
 const DEFAULT_CACHE_TTL_SECONDS = 300;
 
 export const INSTRUCTION = `Summarize the conversation above for context compaction. Everything above will be replaced by your summary, and the work will continue from the summary alone.
@@ -26,18 +28,13 @@ Use these sections and omit empty ones:
 
 Quote the user's instructions and preferences verbatim where wording matters. Preserve exact file paths, commands, identifiers, and error messages. Be concise.`;
 
-interface Snapshot {
-  leafId: string;
-  messages: Message[];
-}
-
 interface Summary {
   text: string;
   usage: Usage;
+  firstKeptEntryId: string;
 }
 
 interface Job {
-  leafId: string;
   summary: Promise<Summary | undefined>;
   controller: AbortController;
 }
@@ -49,7 +46,6 @@ const untilAborted = (signal: AbortSignal) =>
   });
 
 export default function tinyCompact(pi: ExtensionAPI) {
-  let latest: Snapshot | undefined;
   let job: Job | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -64,48 +60,57 @@ export default function tinyCompact(pi: ExtensionAPI) {
     return contextWindow - reserve - keep;
   };
 
-  // The agent's next request plus one user message, so the prompt cache covers all but that message.
-  const summarize = async (
-    ctx: ExtensionContext,
-    snapshot: Snapshot,
-    focus: string | undefined,
-    signal: AbortSignal,
-  ): Promise<Summary> => {
-    const level = pi.getThinkingLevel();
+  // The last model request's input plus one user message: the prompt cache covers all but that message,
+  // and the request fits the context window because the last one did. The last response stays verbatim.
+  const summarize = async (ctx: ExtensionContext, focus: string | undefined, signal: AbortSignal): Promise<Summary> => {
+    const { entries } = ctx.sessionManager.buildSessionProjection();
+    const cut = entries.findLastIndex((entry) => entry.messages.some((message) => message.role === "assistant"));
+    if (cut < 0) throw new Error("there is no model response to summarize up to");
     const instruction: Message = {
       role: "user",
       content: focus ? `${INSTRUCTION}\n\nFocus the summary on: ${focus}` : INSTRUCTION,
       timestamp: Date.now(),
     };
-    const response = await ctx.modelRegistry
-      .streamSimple(ctx.model!, { messages: [...snapshot.messages, instruction] }, {
-        reasoning: level === "off" ? undefined : level,
-        sessionId: ctx.sessionManager.getSessionId(),
-        signal,
-      })
-      .result();
+    const messages = [...convertToLlm(entries.slice(0, cut).flatMap((entry) => entry.messages)), instruction];
+    const level = pi.getThinkingLevel();
+    const retry = pi.getSettings().retry;
+    const response = await retryAssistantCall(
+      () => ctx.modelRegistry
+        .streamSimple(ctx.model!, { messages }, {
+          reasoning: level === "off" ? undefined : level,
+          sessionId: ctx.sessionManager.getSessionId(),
+          signal,
+        })
+        .result(),
+      {
+        enabled: retry?.enabled ?? true,
+        maxRetries: retry?.maxRetries ?? DEFAULT_MAX_RETRIES,
+        baseDelayMs: retry?.baseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS,
+        maxAgentDelayMs: retry?.maxAgentDelayMs,
+      },
+      signal,
+    );
     const text = response.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n").trim();
     if (response.stopReason !== "stop" || !text) {
       throw new Error(response.errorMessage ?? `the model stopped with "${response.stopReason}"`);
     }
-    return { text, usage: response.usage };
+    return { text, usage: response.usage, firstKeptEntryId: entries[cut].sourceEntry.id };
   };
 
-  const start = (ctx: ExtensionContext, snapshot: Snapshot): Job => {
+  // Best effort: when this fails, compaction writes the summary itself.
+  const start = (ctx: ExtensionContext): Job => {
     const controller = new AbortController();
     const started: Job = {
-      leafId: snapshot.leafId,
       controller,
-      summary: summarize(ctx, snapshot, undefined, controller.signal).then(
+      summary: summarize(ctx, undefined, controller.signal).then(
         (summary) => {
           if (job === started) ctx.ui.setStatus("compact", "compact: ready");
           return summary;
         },
-        (error: Error) => {
+        () => {
           if (job !== started) return undefined;
           job = undefined;
           ctx.ui.setStatus("compact", undefined);
-          ctx.ui.notify(`Background compaction failed: ${error.message}`, "warning");
           return undefined;
         },
       ),
@@ -117,49 +122,39 @@ export default function tinyCompact(pi: ExtensionAPI) {
   const reset = (ctx: ExtensionContext) => {
     job?.controller.abort();
     job = undefined;
-    latest = undefined;
     ctx.ui.setStatus("compact", undefined);
   };
 
   pi.on("turn_end", (event, ctx) => {
-    if (event.outcome !== "completed") return;
-    latest = { leafId: ctx.sessionManager.getLeafId()!, messages: event.context.llmMessages };
+    if (event.outcome !== "completed" || job) return;
     const usage = ctx.getContextUsage();
-    if (!job && usage?.tokens != null && usage.tokens > precomputeAt(ctx, usage.contextWindow)) job = start(ctx, latest);
+    if (usage?.tokens != null && usage.tokens > precomputeAt(ctx, usage.contextWindow)) job = start(ctx);
   });
 
+  // Every compaction is written here; returning nothing would run Pi's own.
   pi.on("session_before_compact", async (event, ctx) => {
     const focus = event.customInstructions?.trim();
     const waitStart = Date.now();
-    let throughEntryId: string;
-    let summary: Summary | undefined;
-    if (focus) {
-      if (!latest) return;
-      throughEntryId = latest.leafId;
-      summary = await summarize(ctx, latest, focus, event.signal).catch(() => undefined);
-    } else {
-      // On overflow the latest snapshot may not fit either; only an earlier, running summary helps.
-      if (!job && latest && event.reason !== "overflow") job = start(ctx, latest);
-      if (!job) return;
-      throughEntryId = job.leafId;
-      // Esc stops waiting; the summary keeps running for the next attempt.
-      summary = await Promise.race([job.summary, untilAborted(event.signal)]);
+    // Esc stops waiting; the background summary keeps running for the next attempt.
+    let summary = job && !focus ? await Promise.race([job.summary, untilAborted(event.signal)]) : undefined;
+    if (!summary && !event.signal.aborted) {
+      summary = await summarize(ctx, focus, event.signal).catch((error: Error) => {
+        if (!event.signal.aborted) ctx.ui.notify(`Compaction failed: ${error.message}`, "warning");
+        return undefined;
+      });
     }
-    if (!summary) return;
+    if (!summary) return { cancel: true };
 
-    const index = event.branchEntries.findIndex((entry) => entry.id === throughEntryId);
-    if (index < 0) return;
     const file = ctx.sessionManager.getSessionFile();
     return {
       compaction: {
         summary: file && !summary.text.includes(file)
           ? `${summary.text}\n\nFull transcript before this summary: ${file}`
           : summary.text,
-        // null keeps nothing; Pi records the compaction's own id.
-        firstKeptEntryId: (event.branchEntries[index + 1]?.id ?? null) as string,
+        firstKeptEntryId: summary.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
         usage: summary.usage,
-        details: { compactor: "pi-tiny-compact", throughEntryId, waitedMs: Date.now() - waitStart },
+        details: { compactor: "pi-tiny-compact", waitedMs: Date.now() - waitStart },
       },
     };
   });

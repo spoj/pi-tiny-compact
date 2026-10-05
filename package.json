@@ -1,7 +1,7 @@
 {
   "name": "pi-tiny-compact",
   "version": "0.6.0",
-  "description": "Waitless compaction for Pi: summaries written in the background on the session's prompt cache",
+  "description": "Compaction for Pi that summarizes on the session's prompt cache, usually in the background before it's needed",
   "license": "MIT",
   "type": "module",
   "main": "index.ts",
@@ -21,6 +21,9 @@
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.0.2"
   },
   "pi": {
     "extensions": [
