@@ -7,7 +7,7 @@ const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 2_000;
 
-const RULES = `Reply with only the summary: no tool calls, no further work, no preamble. The summary describes the work, so leave out this request and its rules.
+const RULES = `Reply with only the summary: no tool calls, no further work, no preamble, nothing about this request or its rules.
 
 If what you summarize includes an earlier summary, carry forward what still matters, fold in what happened since, and drop what is obsolete.
 
@@ -25,13 +25,13 @@ Use these sections and omit empty ones:
 
 Quote the user's instructions and preferences verbatim where wording matters. Preserve exact file paths, commands, identifiers, and error messages. Be concise.`;
 
-export const INSTRUCTION = `Summarize the conversation above for context compaction. Everything above will be replaced by your summary, and the work will continue from the summary alone.
+export const INSTRUCTION = `Summarize the conversation above for context compaction.
 
 Start the summary with a title line, \`# <title>\`, that names in a few words what the conversation is about now.
 
 ${RULES}`;
 
-export const branchInstruction = (opening: string) => `Summarize the branch of the conversation from the message that starts «${opening}» to the end. The user is leaving this branch, and your summary will replace it; the conversation before that message stays. Leaving the branch does not undo its changes to files or other state, so record them.
+export const branchInstruction = (opening: string) => `Summarize the branch of the conversation from the message that starts «${opening}» to the end; the user is leaving it. Record its changes to files and other state.
 
 ${RULES}`;
 
