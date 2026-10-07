@@ -250,7 +250,7 @@ export default function tinyCompact(pi: ExtensionAPI) {
       return;
     }
     void pending.summary.then((summary) => {
-      if (!summary || job !== pending || !ctx.isIdle()) return;
+      if (!summary || job !== pending || !ctx.isIdle() || pi.getSettings().compaction?.enabled === false) return;
       ctx.compact({ onComplete: () => ctx.ui.notify("Compacted the idle session because its prompt cache expired", "info") });
     });
   };
