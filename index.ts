@@ -1,9 +1,7 @@
 import { retryAssistantCall, type Message, type Usage } from "@earendil-works/pi-ai";
-import { convertToLlm, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, DEFAULT_COMPACTION_SETTINGS, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-// Pi's built-in defaults.
-const DEFAULT_RESERVE_TOKENS = 16_384;
-const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
+// Pi's built-in retry defaults.
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 2_000;
 
@@ -65,8 +63,8 @@ export default function tinyCompact(pi: ExtensionAPI) {
     const settings = pi.getSettings().compaction;
     if (settings?.enabled === false || !ctx.model) return Infinity;
     const override = settings?.modelOverrides?.[`${ctx.model.provider}/${ctx.model.id}`];
-    const reserve = override?.reserveTokens ?? settings?.reserveTokens ?? DEFAULT_RESERVE_TOKENS;
-    const keep = override?.keepRecentTokens ?? settings?.keepRecentTokens ?? DEFAULT_KEEP_RECENT_TOKENS;
+    const reserve = override?.reserveTokens ?? settings?.reserveTokens ?? DEFAULT_COMPACTION_SETTINGS.reserveTokens;
+    const keep = override?.keepRecentTokens ?? settings?.keepRecentTokens ?? DEFAULT_COMPACTION_SETTINGS.keepRecentTokens;
     return contextWindow - reserve - keep;
   };
 
