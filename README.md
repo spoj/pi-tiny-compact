@@ -1,8 +1,8 @@
 # pi-tiny-compact
 
-Compaction and branch summaries for [Pi](https://github.com/earendil-works/pi), written on the session's prompt cache.
+Compaction for [Pi](https://github.com/earendil-works/pi), written on the session's prompt cache.
 
-Pi's own compaction and branch summaries send a serialized transcript to a separate summarizer prompt, so the request is uncached, and you wait while it runs. This extension writes both instead: the summary request is the conversation itself, so it reuses the agent's prompt cache, and compactions are usually written in the background before Pi's threshold arrives. Compactions also name the session for what it is about now.
+Pi's own compaction sends a serialized transcript to a separate summarizer prompt, so the request is uncached, and you wait while it runs. This extension writes the summary instead: the summary request is the conversation itself, so it reuses the agent's prompt cache, and compactions are usually written in the background before Pi's threshold arrives. Compactions also name the session for what it is about now.
 
 ## Install
 
@@ -20,7 +20,7 @@ Summary requests that fail transiently are retried per Pi's `retry` settings. If
 
 The summary request skips extensions' `context` and `before_provider_request` handlers. If those change the agent's requests, summaries miss the prompt cache.
 
-Summaries use Pi's sections (Goal, Constraints & Preferences, Progress, Key Decisions, Next Steps, Critical Context), and compaction summaries start with a title line, `# <title>`, saying what the session is about now. A summary updates the earlier summaries it covers rather than summarizing them. Each summary ends with the session file's path, so the agent can look up details that it dropped.
+Summaries use Pi's sections (Goal, Constraints & Preferences, Progress, Key Decisions, Next Steps, Critical Context) and start with a title line, `# <title>`, saying what the session is about now. A summary updates the earlier summaries it covers rather than summarizing them. Each summary ends with the session file's path, so the agent can look up details that it dropped.
 
 ## Settings
 
@@ -48,12 +48,6 @@ For example, to compact a 1M-context model at 250,000 tokens and start its summa
 
 `/compact` uses the ready summary, or writes one now. `/compact <focus>` always writes a fresh summary with that focus.
 
-## Branch summaries
-
-When you leave a branch with `/tree` and choose to summarize it, the summary request is the branch's whole context plus one message that quotes where the branch starts. The prompt cache covers all but the last response and that message. "Summarize with custom prompt" adds your text as a focus, as `/compact <focus>` does. The summary ends with the session file's path and the branch's last entry.
-
-The summary is written when you leave, because the destination isn't known before. Requests are retried as for compaction; if the summary still fails, the navigation is cancelled with a warning, and Pi's own branch summary never runs. Pi asks whether to summarize unless `branchSummary.skipPrompt` is true.
-
 ## Idle sessions
 
 Providers keep a prompt cache for a few minutes, and the first request after it expires re-caches the whole context. When a session with a summary stays idle that long, the extension applies the summary first, so the next request re-caches the summary and recent messages instead.
@@ -64,15 +58,15 @@ The cache lifetime is the model's `promptCache` for the retention in use (`PI_CA
 
 `/resume` lists a session by its name, or else by its first message, which a session long enough to compact has usually drifted from. So each compaction (automatic, idle, or `/compact`) names the session with its summary's title line, which costs no extra request. The footer and terminal title show the name too.
 
-A name you set with `/name` or `--name` is never replaced: the extension renames only a session that has no name or still has the name it set last. Compaction entries record the names it sets, so this holds across restarts. Branch summaries don't rename the session.
+A name you set with `/name` or `--name` is never replaced: the extension renames only a session that has no name or still has the name it set last. Compaction entries record the names it sets, so this holds across restarts.
 
 ## Session entries
 
-Each compaction and branch summary records the summary call's `usage`, so session totals include it, and `details`:
+Each compaction records the summary call's `usage`, so session totals include it, and `details`:
 
 - `compactor`: `"pi-tiny-compact"`
-- `waitedMs` (compactions only): how long compaction waited for the summary (`0` when it was ready)
-- `sessionName` (compactions only): the name the compaction gave the session, absent when it gave none
+- `waitedMs`: how long compaction waited for the summary (`0` when it was ready)
+- `sessionName`: the name the compaction gave the session, absent when it gave none
 
 The compacted entries stay in the session file; `/tree` returns to them with the full context.
 
