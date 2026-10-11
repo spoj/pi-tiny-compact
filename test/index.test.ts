@@ -110,15 +110,18 @@ test("starts keepRecentTokens before Pi's threshold, as the last model request p
   assert.equal(s.requests.length, 1);
 });
 
-test("as the summary starts, tells the agent that compaction will summarize everything before then", () => {
+test("as the summary starts, tells the agent which compaction will summarize everything before then", () => {
   const s = session();
+  s.state.branch = [{ type: "compaction" }];
   assert.equal(s.turnEnd(PRECOMPUTE_AT), undefined);
   const other = { type: "custom", customType: "other" };
   assert.deepEqual(s.turnEnd(210_400, "completed", [other]), {
     entries: [other, {
       type: "custom_message",
       customType: "pi-tiny-compact",
-      content: "Context is at 210k tokens. Compaction is due by 256k and will replace everything before this point with a lossy summary.",
+      content: "Automatic notice: context is at 210k tokens. Compaction 2 of this session is expected by 256k. " +
+        "It will replace everything before your response above with a lossy summary headed \"Compaction 2 of this session\", " +
+        "and keep your response above and everything after it verbatim. If that summary is already in your context, this compaction has happened.",
       display: true,
     }],
   });
@@ -141,6 +144,7 @@ test("follows Pi's per-model compaction settings", () => {
 
 test("the threshold applies the ready summary instantly and keeps everything from the last response it saw", async () => {
   const s = session();
+  s.state.branch = [{ type: "compaction" }];
   s.turnEnd(210_000);
   await s.reply("## Goal\nShip it");
   assert.equal(s.state.status, "compact:ready");
@@ -148,7 +152,7 @@ test("the threshold applies the ready summary instantly and keeps everything fro
   s.state.entries.push(entry("a3", "assistant"), entry("r3", "toolResult"));
   const { compaction } = await s.compact();
   assert.equal(s.requests.length, 1);
-  assert.equal(compaction.summary, "## Goal\nShip it\n\nFull transcript before this summary: /sessions/s.jsonl");
+  assert.equal(compaction.summary, "Compaction 2 of this session.\n\n## Goal\nShip it\n\nFull transcript before this summary: /sessions/s.jsonl");
   assert.equal(compaction.firstKeptEntryId, "a2");
   assert.equal(compaction.tokensBefore, 260_000);
   assert.deepEqual(compaction.usage, usage);
@@ -162,7 +166,7 @@ test("a compaction names the session with the summary's title line, which stays 
   const compacting = s.compact();
   await s.reply("# Auth flow\n## Goal\nShip it");
   const { compaction } = await compacting;
-  assert.equal(compaction.summary, "# Auth flow\n## Goal\nShip it\n\nFull transcript before this summary: /sessions/s.jsonl");
+  assert.equal(compaction.summary, "Compaction 1 of this session.\n\n# Auth flow\n## Goal\nShip it\n\nFull transcript before this summary: /sessions/s.jsonl");
   assert.equal(compaction.details.sessionName, "Auth flow");
   assert.equal(s.ctx.sessionManager.getSessionName(), "Auth flow");
 });
@@ -213,7 +217,7 @@ test("a failed background summary is dropped quietly, and compaction writes its 
   const compacting = s.compact();
   assert.equal(s.requests.length, 2);
   await s.reply("Summary");
-  assert.match((await compacting).compaction.summary, /^Summary/);
+  assert.match((await compacting).compaction.summary, /^Compaction 1 of this session\.\n\nSummary/);
 });
 
 test("retries per Pi's retry settings, then cancels with a warning instead of running Pi's compaction", async () => {
@@ -245,7 +249,7 @@ test("waits for a running summary; Esc stops waiting but keeps it running", asyn
 
   const waitingAgain = s.compact();
   await s.reply("Summary");
-  assert.match((await waitingAgain).compaction.summary, /^Summary/);
+  assert.match((await waitingAgain).compaction.summary, /^Compaction 1 of this session\.\n\nSummary/);
   assert.equal(s.requests.length, 1);
 });
 
@@ -258,7 +262,7 @@ test("a focused /compact writes a fresh summary with that focus", async () => {
   assert.equal(s.requests.length, 2);
   assert.equal(s.requests[1].context.messages.at(-1).content, `${INSTRUCTION}\n\nFocus the summary on: the auth flow`);
   await s.reply("Auth summary");
-  assert.match((await focused).compaction.summary, /^Auth summary/);
+  assert.match((await focused).compaction.summary, /^Compaction 1 of this session\.\n\nAuth summary/);
 });
 
 test("tree navigation discards the background summary until the next turn", () => {
