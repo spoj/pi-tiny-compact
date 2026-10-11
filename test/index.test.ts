@@ -64,9 +64,9 @@ const session = (file: any[] = []) => {
 
   return {
     handlers, settings, state, ctx, requests,
-    turnEnd: (tokens: number, outcome = "completed") => {
+    turnEnd: (tokens: number, outcome = "completed", entries: unknown[] = []) => {
       state.tokens = tokens;
-      handlers.turn_end({ outcome }, ctx);
+      return handlers.turn_end({ outcome, entries }, ctx);
     },
     // As in Pi, a compaction is saved before session_compact fires.
     compact: async (event: Record<string, unknown> = {}) => {
@@ -108,6 +108,21 @@ test("starts keepRecentTokens before Pi's threshold, as the last model request p
 
   s.turnEnd(250_000);
   assert.equal(s.requests.length, 1);
+});
+
+test("as the summary starts, tells the agent that compaction will summarize everything before then", () => {
+  const s = session();
+  assert.equal(s.turnEnd(PRECOMPUTE_AT), undefined);
+  const other = { type: "custom", customType: "other" };
+  assert.deepEqual(s.turnEnd(210_400, "completed", [other]), {
+    entries: [other, {
+      type: "custom_message",
+      customType: "pi-tiny-compact",
+      content: "Context is at 210k tokens. Compaction is due by 256k and will replace everything before this point with a lossy summary.",
+      display: true,
+    }],
+  });
+  assert.equal(s.turnEnd(250_000), undefined);
 });
 
 test("follows Pi's per-model compaction settings", () => {

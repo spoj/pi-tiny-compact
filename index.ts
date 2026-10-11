@@ -48,17 +48,6 @@ export default function tinyCompact(pi: ExtensionAPI) {
   let job: Job | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
-  // Pi compacts above contextWindow - reserveTokens. Starting keepRecentTokens earlier leaves that much
-  // conversation to keep verbatim, and that much time for the summary to finish.
-  const precomputeAt = (ctx: ExtensionContext, contextWindow: number) => {
-    const settings = pi.getSettings().compaction;
-    if (settings?.enabled === false || !ctx.model) return Infinity;
-    const override = settings?.modelOverrides?.[`${ctx.model.provider}/${ctx.model.id}`];
-    const reserve = override?.reserveTokens ?? settings?.reserveTokens ?? DEFAULT_COMPACTION_SETTINGS.reserveTokens;
-    const keep = override?.keepRecentTokens ?? settings?.keepRecentTokens ?? DEFAULT_COMPACTION_SETTINGS.keepRecentTokens;
-    return contextWindow - reserve - keep;
-  };
-
   // The last model request's input plus one user message, with the agent's model and thinking level: the prompt
   // cache covers all but that message, and the request fits the context window because the last one did.
   // The last response stays verbatim.
@@ -124,10 +113,27 @@ export default function tinyCompact(pi: ExtensionAPI) {
     ctx.ui.setStatus("compact", undefined);
   };
 
+  // Pi compacts above contextWindow - reserveTokens. Starting keepRecentTokens earlier leaves that much
+  // conversation to keep verbatim, and that much time for the summary to finish.
   pi.on("turn_end", (event, ctx) => {
-    if (event.outcome !== "completed" || job) return;
+    const settings = pi.getSettings().compaction;
     const usage = ctx.getContextUsage();
-    if (usage?.tokens != null && usage.tokens > precomputeAt(ctx, usage.contextWindow)) job = start(ctx);
+    if (event.outcome !== "completed" || job || settings?.enabled === false || !ctx.model || usage?.tokens == null) return;
+    const override = settings?.modelOverrides?.[`${ctx.model.provider}/${ctx.model.id}`];
+    const reserve = override?.reserveTokens ?? settings?.reserveTokens ?? DEFAULT_COMPACTION_SETTINGS.reserveTokens;
+    const keep = override?.keepRecentTokens ?? settings?.keepRecentTokens ?? DEFAULT_COMPACTION_SETTINGS.keepRecentTokens;
+    const threshold = usage.contextWindow - reserve;
+    if (usage.tokens <= threshold - keep) return;
+    job = start(ctx);
+    // The summary covers everything before this turn's response, so this is where compaction will cut.
+    return {
+      entries: [...event.entries, {
+        type: "custom_message",
+        customType: "pi-tiny-compact",
+        content: `Context is at ${Math.round(usage.tokens / 1000)}k tokens. Compaction is due by ${Math.round(threshold / 1000)}k and will replace everything before this point with a lossy summary.`,
+        display: true,
+      }],
+    };
   });
 
   // Every compaction is written here; returning nothing would run Pi's own.
