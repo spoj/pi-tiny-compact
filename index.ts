@@ -67,6 +67,8 @@ export default function tinyCompact(pi: ExtensionAPI) {
         .streamSimple(ctx.model!, { messages }, {
           reasoning: level === "off" ? undefined : level,
           sessionId: ctx.sessionManager.getSessionId(),
+          // As for Pi's cache warming: the agent's next request continues its own last reply, not this one.
+          disableContinuation: true,
           signal,
         })
         .result(),

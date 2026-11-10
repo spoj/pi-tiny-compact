@@ -104,6 +104,7 @@ test("starts keepRecentTokens before Pi's threshold, as the last model request p
   assert.equal(context.messages.at(-1).content, INSTRUCTION);
   assert.equal(options.reasoning, "high");
   assert.equal(options.sessionId, "session-1");
+  assert.equal(options.disableContinuation, true);
   assert.equal(s.state.status, "compact:running");
 
   s.turnEnd(250_000);
