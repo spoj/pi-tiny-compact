@@ -54,6 +54,8 @@ Providers keep a prompt cache for a few minutes, and the first request after it 
 
 The cache lifetime is the model's `promptCache` for the retention in use (`PI_CACHE_RETENTION`), counted as Pi's cache warming counts it: from when the last request was sent, or from the last refresh. A model without one is not compacted for idleness, as Pi doesn't warm its cache either; a `modelOverrides` entry in `models.json` can declare it.
 
+Pi's idle cache warming (`cacheWarming: "idle"`, the default) would keep refreshing that cache for up to 30 minutes, since it prices a miss as re-caching the whole context. Once a summary is ready, a miss costs only the summary and recent messages, so the extension stops the idle refreshes and the summary applies when the cache expires. Refreshes while the agent is working are left alone.
+
 ## Session names
 
 `/resume` lists a session by its name, or else by its first message, which a session long enough to compact has usually drifted from. So each compaction (automatic, idle, or `/compact`) names the session with its summary's title line, which costs no extra request. The footer and terminal title show the name too.

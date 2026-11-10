@@ -300,6 +300,20 @@ test("applies the summary when the idle prompt cache expires, after cache-warmin
   assert.equal(s.state.compactions, 1);
 });
 
+test("stops Pi's idle cache warming once a summary is ready to apply", async (t) => {
+  const s = idle(t);
+  const decide = () => s.handlers.cache_warming_decision({ action: "warm" }, s.ctx);
+  assert.equal(decide(), undefined);
+  await s.reply("Summary");
+  assert.deepEqual(decide(), { action: "stop" });
+
+  s.state.idle = false;
+  assert.equal(decide(), undefined);
+  s.state.idle = true;
+  s.settings.compaction.enabled = false;
+  assert.equal(decide(), undefined);
+});
+
 test("times the idle prompt cache from when the last request was sent, not when its response finished", async (t) => {
   const s = idle(t);
   await s.reply("Summary");

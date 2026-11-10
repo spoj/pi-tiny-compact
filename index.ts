@@ -36,6 +36,7 @@ interface Summary {
 interface Job {
   summary: Promise<Summary | undefined>;
   controller: AbortController;
+  ready: boolean;
 }
 
 const untilAborted = (signal: AbortSignal) =>
@@ -92,8 +93,10 @@ export default function tinyCompact(pi: ExtensionAPI) {
     const controller = new AbortController();
     const started: Job = {
       controller,
+      ready: false,
       summary: summarize(ctx, undefined, controller.signal).then(
         (summary) => {
+          started.ready = true;
           if (job === started) ctx.ui.setStatus("compact", "compact:ready");
           return summary;
         },
@@ -208,6 +211,11 @@ export default function tinyCompact(pi: ExtensionAPI) {
   };
 
   pi.on("agent_settled", (_event, ctx) => applyWhenCacheExpires(ctx));
+  // Pi keeps an idle session's cache warm when a miss would cost more: the whole context, cached again. With a summary
+  // ready, a miss costs only the summary and what follows it, so let the cache expire and the summary apply.
+  pi.on("cache_warming_decision", (_event, ctx) => {
+    if (job?.ready && ctx.isIdle() && pi.getSettings().compaction?.enabled !== false) return { action: "stop" };
+  });
   // Rename once Pi has saved the compaction, so every name this extension sets is on record.
   pi.on("session_compact", (event, ctx) => {
     reset(ctx);
