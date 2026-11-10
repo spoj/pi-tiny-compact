@@ -10,6 +10,8 @@ Pi's own compaction sends a serialized transcript to a separate summarizer promp
 pi install git:github.com/spoj/pi-tiny-compact
 ```
 
+It needs Pi 1.5.1 or later.
+
 ## How it works
 
 A summary resends the input of the last model request with one user message appended, asking for a summary. Model, thinking level, system prompt, tools, and messages are unchanged, so the prompt cache covers all but that message, and the model summarizes the real conversation rather than a serialized transcript. The request fits the context window because the last one did, even after a context overflow. The summary replaces everything before the last response; that response and everything after it stay verbatim.

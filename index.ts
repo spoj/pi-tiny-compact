@@ -1,4 +1,4 @@
-import { retryAssistantCall, type Message, type Usage } from "@earendil-works/pi-ai";
+import { getPromptCacheTtlMs, retryAssistantCall, type Message, type Usage } from "@earendil-works/pi-ai";
 import { convertToLlm, DEFAULT_COMPACTION_SETTINGS, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // Pi's built-in retry defaults.
@@ -189,8 +189,7 @@ export default function tinyCompact(pi: ExtensionAPI) {
     clearTimeout(timer);
     const pending = job;
     if (!pending) return;
-    const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
-    const ttl = ctx.model?.promptCache?.[retention];
+    const ttl = ctx.model && getPromptCacheTtlMs(ctx.model, undefined);
     if (ttl === undefined) return;
     const lastCacheUse = ctx.sessionManager.getBranch().findLast((entry) =>
       (entry.type === "message" && entry.message.role === "assistant") ||
@@ -198,7 +197,7 @@ export default function tinyCompact(pi: ExtensionAPI) {
     if (!lastCacheUse) return;
     // As Pi's cache warming does: a response from when its request was sent, a refresh from when it finished.
     const usedAt = lastCacheUse.type === "message" ? lastCacheUse.message.timestamp : Date.parse(lastCacheUse.timestamp);
-    const wait = usedAt + ttl * 1000 - Date.now();
+    const wait = usedAt + ttl - Date.now();
     if (wait > 0) {
       timer = setTimeout(() => applyWhenCacheExpires(ctx), wait);
       timer.unref();
