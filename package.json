@@ -11,7 +11,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/index.test.ts"
+    "test": "node --test test/index.test.ts",
+    "check": "tsc --noEmit && npm test"
   },
   "keywords": [
     "pi-package",
@@ -24,7 +25,9 @@
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^1.5.1",
-    "@earendil-works/pi-coding-agent": "^1.5.1"
+    "@earendil-works/pi-coding-agent": "^1.5.1",
+    "@types/node": "^22.19.19",
+    "typescript": "^7.0.2"
   },
   "pi": {
     "extensions": [

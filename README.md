@@ -74,5 +74,5 @@ The compacted entries stay in the session file; `/tree` returns to them with the
 
 ```bash
 npm ci
-npm test
+npm run check
 ```
