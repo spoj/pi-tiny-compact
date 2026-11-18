@@ -111,22 +111,11 @@ test("starts keepRecentTokens before Pi's threshold, as the last model request p
   assert.equal(s.requests.length, 1);
 });
 
-test("as the summary starts, tells the agent which compaction will summarize everything before then", () => {
+test("starts the background summary without appending a message to the conversation", () => {
   const s = session();
-  s.state.branch = [{ type: "compaction" }];
-  assert.equal(s.turnEnd(PRECOMPUTE_AT), undefined);
   const other = { type: "custom", customType: "other" };
-  assert.deepEqual(s.turnEnd(210_400, "completed", [other]), {
-    entries: [other, {
-      type: "custom_message",
-      customType: "pi-tiny-compact",
-      content: "Automatic notice: context is at 210k tokens. Compaction 2 of this session is expected by 256k. " +
-        "It will replace everything before your response above with a lossy summary headed \"Compaction 2 of this session\", " +
-        "and keep your response above and everything after it verbatim. If that summary is already in your context, this compaction has happened.",
-      display: true,
-    }],
-  });
-  assert.equal(s.turnEnd(250_000), undefined);
+  assert.equal(s.turnEnd(PRECOMPUTE_AT + 1, "completed", [other]), undefined);
+  assert.equal(s.requests.length, 1);
 });
 
 test("follows Pi's per-model compaction settings", () => {

@@ -130,19 +130,6 @@ export default function tinyCompact(pi: ExtensionAPI) {
     const threshold = usage.contextWindow - reserve;
     if (usage.tokens <= threshold - keep) return;
     job = start(ctx);
-    // The summary covers everything before this turn's response, so this is where compaction will cut. The notice
-    // stays in context after compaction; the shared number lets the agent tell a past compaction from a coming one.
-    const compaction = `Compaction ${ctx.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length + 1} of this session`;
-    return {
-      entries: [...event.entries, {
-        type: "custom_message",
-        customType: "pi-tiny-compact",
-        content: `Automatic notice: context is at ${Math.round(usage.tokens / 1000)}k tokens. ${compaction} is expected by ${Math.round(threshold / 1000)}k. ` +
-          `It will replace everything before your response above with a lossy summary headed "${compaction}", ` +
-          "and keep your response above and everything after it verbatim. If that summary is already in your context, this compaction has happened.",
-        display: true,
-      }],
-    };
   });
 
   // Every compaction is written here; returning nothing would run Pi's own.
